@@ -1,5 +1,10 @@
 # lexsim
 
+[![CI](https://github.com/alphaelements/lexsim/actions/workflows/ci.yml/badge.svg)](https://github.com/alphaelements/lexsim/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/lexsim.svg)](https://crates.io/crates/lexsim)
+[![docs.rs](https://docs.rs/lexsim/badge.svg)](https://docs.rs/lexsim)
+[![license](https://img.shields.io/crates/l/lexsim.svg)](#license)
+
 A **dictionary-free, multilingual lexical similarity engine** for Rust:
 tokenize + Jaccard + BM25 + a stable content hash, sharing one tokenizer.
 
