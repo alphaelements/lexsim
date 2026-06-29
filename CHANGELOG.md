@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+### Changed
+
+- **Breaking (CLI):** `tokenize` output format changed from
+  `{"results":[{"tokens":[...],"count":N},...]}` to `{"tokens":[[...],...]}`
+  for consistency with `jaccard`/`bm25`/`hash` flat-object style
+- Removed `serde` `derive` feature from CLI dependencies (no longer needed)
+
 ## 0.2.0
 
 ### Added

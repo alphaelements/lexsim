@@ -38,7 +38,7 @@ documents). Its only dependencies are `unicode-segmentation` and
 
 ```toml
 [dependencies]
-lexsim = "0.1"
+lexsim = "0.2"
 ```
 
 ## Usage
@@ -98,7 +98,7 @@ Subcommands: `tokenize`, `jaccard`, `bm25`, `hash`.
 
 ```sh
 echo '{"texts": ["hello world"]}' | lexsim tokenize
-# → {"results":[{"tokens":["hello","world",...],"count":11}]}
+# → {"tokens":[["hello","world",...]]}
 
 echo '{"a": "hello world", "b": "hello there"}' | lexsim jaccard
 # → {"score":0.6}

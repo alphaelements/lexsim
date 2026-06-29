@@ -62,10 +62,10 @@ fn tokenize_basic() {
     let (stdout, _, code) = run_cli("tokenize", input);
     assert_eq!(code, 0, "exit code should be 0");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let results = v["results"].as_array().unwrap();
-    assert_eq!(results.len(), 1);
-    assert!(results[0]["count"].as_u64().unwrap() > 0);
-    let tokens = results[0]["tokens"].as_array().unwrap();
+    let tokens_outer = v["tokens"].as_array().unwrap();
+    assert_eq!(tokens_outer.len(), 1);
+    let tokens = tokens_outer[0].as_array().unwrap();
+    assert!(tokens.len() > 0);
     assert!(tokens.iter().any(|t| t.as_str() == Some("hello")));
     assert!(tokens.iter().any(|t| t.as_str() == Some("world")));
 }
@@ -76,8 +76,8 @@ fn tokenize_batch_preserves_order() {
     let (stdout, _, code) = run_cli("tokenize", input);
     assert_eq!(code, 0);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let results = v["results"].as_array().unwrap();
-    assert_eq!(results.len(), 3);
+    let tokens = v["tokens"].as_array().unwrap();
+    assert_eq!(tokens.len(), 3);
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn tokenize_japanese() {
     let (stdout, _, code) = run_cli("tokenize", input);
     assert_eq!(code, 0);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let tokens = v["results"][0]["tokens"].as_array().unwrap();
+    let tokens = v["tokens"][0].as_array().unwrap();
     assert!(tokens.iter().any(|t| t.as_str() == Some("メモ")));
 }
 
@@ -96,7 +96,7 @@ fn tokenize_empty_texts() {
     let (stdout, _, code) = run_cli("tokenize", input);
     assert_eq!(code, 0);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(v["results"].as_array().unwrap().len(), 0);
+    assert_eq!(v["tokens"].as_array().unwrap().len(), 0);
 }
 
 // ── jaccard ──
@@ -229,7 +229,7 @@ fn tokenize_mixed_language() {
     let (stdout, _, code) = run_cli("tokenize", input);
     assert_eq!(code, 0);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let tokens = v["results"][0]["tokens"].as_array().unwrap();
+    let tokens = v["tokens"][0].as_array().unwrap();
     assert!(tokens.iter().any(|t| t.as_str() == Some("atomic")));
     assert!(tokens.iter().any(|t| t.as_str() == Some("write")));
 }
@@ -264,15 +264,15 @@ fn hash_empty_text() {
 }
 
 #[test]
-fn tokenize_count_equals_tokens_len() {
+fn tokenize_returns_no_results_key() {
     let input = r#"{"texts": ["hello world foo bar"]}"#;
     let (stdout, _, code) = run_cli("tokenize", input);
     assert_eq!(code, 0);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let result = &v["results"][0];
-    let tokens = result["tokens"].as_array().unwrap();
-    let count = result["count"].as_u64().unwrap() as usize;
-    assert_eq!(count, tokens.len(), "count must equal tokens.len()");
+    assert!(v.get("results").is_none(), "should not have 'results' key");
+    assert!(v.get("tokens").is_some(), "should have 'tokens' key");
+    let tokens = v["tokens"][0].as_array().unwrap();
+    assert!(tokens.len() > 0);
 }
 
 #[test]
@@ -281,10 +281,9 @@ fn tokenize_non_string_element_treated_as_empty() {
     let (stdout, _, code) = run_cli("tokenize", input);
     assert_eq!(code, 0);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let results = v["results"].as_array().unwrap();
-    assert_eq!(results.len(), 3);
-    for r in results {
-        assert_eq!(r["count"].as_u64().unwrap(), 0);
-        assert!(r["tokens"].as_array().unwrap().is_empty());
+    let tokens = v["tokens"].as_array().unwrap();
+    assert_eq!(tokens.len(), 3);
+    for t in tokens {
+        assert!(t.as_array().unwrap().is_empty());
     }
 }
