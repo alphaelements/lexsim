@@ -6,3 +6,4 @@
 Thumbs.db
 lcov.info
 *.profraw
+.handoff/
