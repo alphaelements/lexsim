@@ -1,7 +1,6 @@
 use std::io::{self, Read};
 use std::process;
 
-use serde::Serialize;
 use serde_json::Value;
 
 use lexsim::{content_hash, jaccard, tokenize, Corpus};
@@ -62,17 +61,12 @@ fn cmd_tokenize(input: &Value) -> Result<Value, String> {
         .and_then(|v| v.as_array())
         .ok_or("missing or invalid \"texts\" array")?;
 
-    let results: Vec<TokenizeResult> = texts
+    let tokens: Vec<Vec<String>> = texts
         .iter()
-        .map(|v| {
-            let text = v.as_str().unwrap_or("");
-            let tokens = tokenize(text);
-            let count = tokens.len();
-            TokenizeResult { tokens, count }
-        })
+        .map(|v| tokenize(v.as_str().unwrap_or("")))
         .collect();
 
-    Ok(serde_json::to_value(TokenizeOutput { results }).unwrap())
+    Ok(serde_json::json!({"tokens": tokens}))
 }
 
 fn cmd_jaccard(input: &Value) -> Result<Value, String> {
@@ -143,15 +137,4 @@ fn print_usage() {
     eprintln!("  jaccard   Compute Jaccard similarity (stdin JSON → stdout JSON)");
     eprintln!("  bm25      Compute BM25 scores (stdin JSON → stdout JSON)");
     eprintln!("  hash      Compute content hashes (stdin JSON → stdout JSON)");
-}
-
-#[derive(Serialize)]
-struct TokenizeResult {
-    tokens: Vec<String>,
-    count: usize,
-}
-
-#[derive(Serialize)]
-struct TokenizeOutput {
-    results: Vec<TokenizeResult>,
 }

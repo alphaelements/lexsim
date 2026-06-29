@@ -1,6 +1,6 @@
 [package]
 name = "lexsim"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Dictionary-free, multilingual lexical similarity engine (tokenize + Jaccard + BM25 + content hash)"
 license = "MIT OR Apache-2.0"
@@ -18,7 +18,7 @@ cli = ["dep:serde", "dep:serde_json"]
 [dependencies]
 unicode-segmentation = "1"
 unicode-normalization = "0.1"
-serde = { version = "1", features = ["derive"], optional = true }
+serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
