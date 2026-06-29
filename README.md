@@ -84,6 +84,32 @@ let corpus = Corpus::build(&memories);
 assert!(corpus.bm25_scores("メモリ atomic_write")[0] > 0.0);
 ```
 
+## CLI
+
+`lexsim` also ships a CLI binary for use from other languages (e.g. via
+`child_process.execFile()` in Node.js). It reads JSON from stdin and writes JSON
+to stdout.
+
+```sh
+cargo install lexsim --features cli
+```
+
+Subcommands: `tokenize`, `jaccard`, `bm25`, `hash`.
+
+```sh
+echo '{"texts": ["hello world"]}' | lexsim tokenize
+# → {"results":[{"tokens":["hello","world",...],"count":11}]}
+
+echo '{"a": "hello world", "b": "hello there"}' | lexsim jaccard
+# → {"score":0.6}
+
+echo '{"corpus": ["atomic write", "cat mat"], "query": "atomic"}' | lexsim bm25
+# → {"scores":[0.693147,0.0]}
+
+echo '{"texts": ["hello world", "Hello World"]}' | lexsim hash
+# → {"hashes":["<same>","<same>"]}
+```
+
 ## Public API
 
 | Item | Purpose |
