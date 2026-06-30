@@ -77,11 +77,15 @@
 
 mod hash;
 mod score;
+mod sentiment;
 mod tokenize;
 
 pub use hash::{content_hash, fnv1a_hex};
-pub use score::{jaccard, jaccard_sets, token_set, Corpus};
-pub use tokenize::{normalize, tokenize};
+pub use score::{
+    corpus_diff, jaccard, jaccard_sets, token_set, Corpus, DistinctiveKeyword, KeywordEntry,
+};
+pub use sentiment::{analyze_sentiment, Polarity, SentimentResult};
+pub use tokenize::{is_cl_ngram, normalize, tokenize, tokenize_ngrams};
 
 /// Abstraction over "score these documents against this query". Today the only
 /// implementation is lexical BM25 ([`LexicalScorer`]); the trait exists so an

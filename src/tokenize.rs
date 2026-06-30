@@ -60,6 +60,41 @@ pub fn tokenize(text: &str) -> Vec<String> {
     out
 }
 
+/// Returns `true` if `token` is a cross-language character n-gram (CL-CnG)
+/// rather than a word token. CL-CnG tokens are prefixed with an internal
+/// marker and are useful for matching but not for human-facing output.
+pub fn is_cl_ngram(token: &str) -> bool {
+    token.starts_with(NGRAM_PREFIX)
+}
+
+/// Like [`tokenize`] but generates word-level n-grams of the given size.
+///
+/// `n = 1` is equivalent to [`tokenize`]. For `n = 2`, adjacent word tokens
+/// (excluding CL-CnG trigrams) are joined with a space to form bigrams; the
+/// base unigrams are also included. For `n = 3`, both bigrams and trigrams are
+/// emitted alongside unigrams.
+pub fn tokenize_ngrams(text: &str, n: usize) -> Vec<String> {
+    let mut out = tokenize(text);
+    if n <= 1 {
+        return out;
+    }
+
+    let word_tokens: Vec<String> = out
+        .iter()
+        .filter(|t| !t.starts_with(NGRAM_PREFIX))
+        .cloned()
+        .collect();
+
+    for window_size in 2..=n {
+        if word_tokens.len() >= window_size {
+            for window in word_tokens.windows(window_size) {
+                out.push(window.join(" "));
+            }
+        }
+    }
+    out
+}
+
 /// NFKC normalize and lowercase. Public so callers can compute a stable
 /// canonical form (e.g. for content hashing) with the same normalization the
 /// tokenizer uses.
@@ -371,5 +406,42 @@ mod tests {
     fn digits_kept() {
         let toks = word_tokens("version 0.13.0");
         assert!(toks.iter().any(|t| t.contains("13") || t == "0"));
+    }
+
+    #[test]
+    fn tokenize_ngrams_unigram_equals_tokenize() {
+        let text = "hello world foo";
+        assert_eq!(tokenize_ngrams(text, 1), tokenize(text));
+    }
+
+    #[test]
+    fn tokenize_ngrams_bigrams() {
+        let toks = tokenize_ngrams("hello world foo", 2);
+        assert!(toks.contains(&"hello world".to_string()));
+        assert!(toks.contains(&"world foo".to_string()));
+        // unigrams still present
+        assert!(toks.contains(&"hello".to_string()));
+    }
+
+    #[test]
+    fn tokenize_ngrams_trigrams() {
+        let toks = tokenize_ngrams("hello world foo bar", 3);
+        assert!(toks.contains(&"hello world foo".to_string()));
+        assert!(toks.contains(&"world foo bar".to_string()));
+        // bigrams also present
+        assert!(toks.contains(&"hello world".to_string()));
+    }
+
+    #[test]
+    fn tokenize_ngrams_empty() {
+        assert!(tokenize_ngrams("", 2).is_empty());
+    }
+
+    #[test]
+    fn tokenize_ngrams_single_word() {
+        let toks = tokenize_ngrams("hello", 2);
+        assert!(toks.contains(&"hello".to_string()));
+        // no bigrams possible from a single word token
+        assert!(!toks.iter().any(|t| t.contains(' ')));
     }
 }
