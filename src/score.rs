@@ -4,7 +4,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::tokenize::tokenize;
+use crate::tokenize::{is_cl_ngram, tokenize};
+
+/// A keyword with its TF-IDF score and raw count across the corpus.
+#[derive(Debug, Clone)]
+pub struct KeywordEntry {
+    pub keyword: String,
+    pub score: f64,
+    pub count: u32,
+}
 
 /// BM25 term-frequency saturation parameter (standard default).
 const BM25_K1: f64 = 1.2;
@@ -113,6 +121,57 @@ impl Corpus {
         self.bm25_scores_tokens(&query_terms)
     }
 
+    /// Extract top-N keywords from the corpus ranked by TF-IDF score.
+    ///
+    /// Uses smoothed IDF: `ln((N + 1) / df)` so single-document and
+    /// homogeneous corpora still produce results instead of all-zero scores.
+    /// CL-CnG (internal character n-gram) tokens are excluded from output.
+    pub fn tfidf_keywords(&self, top_n: usize) -> Vec<KeywordEntry> {
+        if self.n == 0 {
+            return Vec::new();
+        }
+
+        let mut global_tf: HashMap<&str, u32> = HashMap::new();
+        for tf_map in &self.doc_tf {
+            for (term, &count) in tf_map {
+                if !is_cl_ngram(term) {
+                    *global_tf.entry(term.as_str()).or_insert(0) += count;
+                }
+            }
+        }
+
+        let total_tokens: f64 = global_tf.values().map(|&c| c as f64).sum();
+        if total_tokens == 0.0 {
+            return Vec::new();
+        }
+
+        let mut entries: Vec<KeywordEntry> = global_tf
+            .iter()
+            .filter_map(|(&term, &count)| {
+                let df = *self.df.get(term)? as f64;
+                let tf = count as f64 / total_tokens;
+                let idf = ((self.n as f64 + 1.0) / df).ln();
+                let score = tf * idf;
+                if score <= 0.0 {
+                    return None;
+                }
+                Some(KeywordEntry {
+                    keyword: term.to_string(),
+                    score,
+                    count,
+                })
+            })
+            .collect();
+
+        entries.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        entries.truncate(top_n);
+        entries
+    }
+
     /// BM25 over pre-tokenized query terms (lets callers inject extra terms,
     /// e.g. file basenames, without re-tokenizing).
     pub fn bm25_scores_tokens(&self, query_terms: &[String]) -> Vec<f64> {
@@ -145,6 +204,103 @@ impl Corpus {
         }
         scores
     }
+}
+
+/// A keyword distinctive to one side of a corpus comparison.
+#[derive(Debug, Clone)]
+pub struct DistinctiveKeyword {
+    pub keyword: String,
+    pub ratio: f64,
+}
+
+/// Compare two corpora and return keywords distinctive to each side.
+///
+/// "Distinctive" means the keyword's normalized frequency in one corpus is
+/// significantly higher than in the other. `ratio` = freq_this / freq_other
+/// (with a small smoothing term to avoid division by zero).
+///
+/// Returns `(a_distinctive, b_distinctive)` sorted by descending ratio.
+pub fn corpus_diff(
+    corpus_a: &[String],
+    corpus_b: &[String],
+    top_n: usize,
+) -> (Vec<DistinctiveKeyword>, Vec<DistinctiveKeyword>) {
+    let tf_a = normalized_tf(corpus_a);
+    let tf_b = normalized_tf(corpus_b);
+
+    let all_terms: HashSet<&String> = tf_a.keys().chain(tf_b.keys()).collect();
+
+    // Smoothing: assume each unseen term appeared once in a corpus of
+    // comparable size. This keeps ratios interpretable (typically 1–20)
+    // rather than astronomical when a term is exclusive to one side.
+    let size_a = tf_a.values().count().max(1) as f64;
+    let size_b = tf_b.values().count().max(1) as f64;
+    let smooth_a = 1.0 / (size_a + 1.0);
+    let smooth_b = 1.0 / (size_b + 1.0);
+
+    let mut a_distinctive: Vec<DistinctiveKeyword> = Vec::new();
+    let mut b_distinctive: Vec<DistinctiveKeyword> = Vec::new();
+
+    for term in &all_terms {
+        let fa = tf_a.get(*term).copied().unwrap_or(0.0);
+        let fb = tf_b.get(*term).copied().unwrap_or(0.0);
+
+        let ratio_a = (fa + smooth_a) / (fb + smooth_b);
+        let ratio_b = (fb + smooth_b) / (fa + smooth_a);
+
+        if ratio_a > 1.5 {
+            a_distinctive.push(DistinctiveKeyword {
+                keyword: term.to_string(),
+                ratio: ratio_a,
+            });
+        }
+        if ratio_b > 1.5 {
+            b_distinctive.push(DistinctiveKeyword {
+                keyword: term.to_string(),
+                ratio: ratio_b,
+            });
+        }
+    }
+
+    a_distinctive.sort_by(|a, b| {
+        b.ratio
+            .partial_cmp(&a.ratio)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    b_distinctive.sort_by(|a, b| {
+        b.ratio
+            .partial_cmp(&a.ratio)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    a_distinctive.truncate(top_n);
+    b_distinctive.truncate(top_n);
+
+    (a_distinctive, b_distinctive)
+}
+
+fn normalized_tf(docs: &[String]) -> HashMap<String, f64> {
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut total = 0u32;
+
+    for doc in docs {
+        for token in tokenize(doc) {
+            if is_cl_ngram(&token) {
+                continue;
+            }
+            *counts.entry(token).or_insert(0) += 1;
+            total += 1;
+        }
+    }
+
+    if total == 0 {
+        return HashMap::new();
+    }
+
+    counts
+        .into_iter()
+        .map(|(term, count)| (term, count as f64 / total as f64))
+        .collect()
 }
 
 #[cfg(test)]
@@ -240,5 +396,100 @@ mod tests {
         let scores = corpus.bm25_scores("atomic_write");
         assert!(scores[0] > scores[1]);
         assert!(scores[0] > 0.0);
+    }
+
+    #[test]
+    fn tfidf_keywords_ranks_distinctive_terms() {
+        let docs = vec![
+            "rust rust rust programming".to_string(),
+            "python programming language".to_string(),
+            "rust language systems".to_string(),
+        ];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(5);
+        assert!(!kw.is_empty());
+        assert!(kw[0].score > 0.0);
+        assert!(kw[0].count > 0);
+    }
+
+    #[test]
+    fn tfidf_keywords_single_doc_not_empty() {
+        let docs = vec!["Rust is a systems programming language".to_string()];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(5);
+        assert!(!kw.is_empty(), "single-doc corpus must produce keywords");
+        assert!(kw[0].score > 0.0);
+    }
+
+    #[test]
+    fn tfidf_keywords_no_cl_ngram_leakage() {
+        let docs = vec!["hello world rust".to_string()];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(20);
+        for entry in &kw {
+            assert!(
+                !entry.keyword.starts_with('\u{1}'),
+                "CL-CnG leaked: {:?}",
+                entry.keyword
+            );
+        }
+    }
+
+    #[test]
+    fn tfidf_keywords_empty_corpus() {
+        let corpus = Corpus::build(&[]);
+        assert!(corpus.tfidf_keywords(10).is_empty());
+    }
+
+    #[test]
+    fn tfidf_keywords_respects_top_n() {
+        let docs = vec!["a b c d e f g h i j".to_string()];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(3);
+        assert!(kw.len() <= 3);
+    }
+
+    #[test]
+    fn tfidf_keywords_japanese() {
+        let docs = vec![
+            "メモリ機能はセッション間で教訓を引き継ぐ".to_string(),
+            "メモリ機能で過去の学びを保持する".to_string(),
+        ];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(10);
+        assert!(!kw.is_empty());
+    }
+
+    #[test]
+    fn corpus_diff_finds_distinctive_keywords() {
+        let a = vec![
+            "rust systems programming".to_string(),
+            "rust memory safety".to_string(),
+        ];
+        let b = vec![
+            "python data science".to_string(),
+            "python machine learning".to_string(),
+        ];
+        let (a_dist, b_dist) = corpus_diff(&a, &b, 10);
+        assert!(!a_dist.is_empty());
+        assert!(!b_dist.is_empty());
+        assert!(a_dist[0].ratio > 1.5);
+        assert!(b_dist[0].ratio > 1.5);
+    }
+
+    #[test]
+    fn corpus_diff_identical_corpora_no_distinctive() {
+        let a = vec!["hello world".to_string()];
+        let b = vec!["hello world".to_string()];
+        let (a_dist, b_dist) = corpus_diff(&a, &b, 10);
+        assert!(a_dist.is_empty());
+        assert!(b_dist.is_empty());
+    }
+
+    #[test]
+    fn corpus_diff_empty_corpora() {
+        let (a_dist, b_dist) = corpus_diff(&[], &[], 10);
+        assert!(a_dist.is_empty());
+        assert!(b_dist.is_empty());
     }
 }

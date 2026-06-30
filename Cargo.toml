@@ -1,6 +1,6 @@
 [package]
 name = "lexsim"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Dictionary-free, multilingual lexical similarity engine (tokenize + Jaccard + BM25 + content hash)"
 license = "MIT OR Apache-2.0"

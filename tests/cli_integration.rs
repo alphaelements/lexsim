@@ -275,6 +275,271 @@ fn tokenize_returns_no_results_key() {
     assert!(tokens.len() > 0);
 }
 
+// ── keywords ──
+
+#[test]
+fn keywords_basic() {
+    let input =
+        r#"{"texts": ["rust programming", "rust systems programming", "rust memory safety"]}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let keywords = v["keywords"].as_array().unwrap();
+    assert!(!keywords.is_empty());
+    let first = &keywords[0];
+    assert!(first["keyword"].as_str().is_some());
+    assert!(first["score"].as_f64().unwrap() > 0.0);
+    assert!(first["count"].as_u64().unwrap() > 0);
+    for kw in keywords {
+        let k = kw["keyword"].as_str().unwrap();
+        assert!(
+            !k.starts_with('\u{1}'),
+            "CL-CnG token leaked into keywords output: {k:?}"
+        );
+    }
+}
+
+#[test]
+fn keywords_single_document() {
+    let input = r#"{"texts": ["Rust is a systems programming language"], "top_n": 5}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let keywords = v["keywords"].as_array().unwrap();
+    assert!(
+        !keywords.is_empty(),
+        "single-doc corpus must still return keywords"
+    );
+}
+
+#[test]
+fn keywords_top_n() {
+    let input = r#"{"texts": ["a b c d e f g h i j"], "top_n": 3}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let keywords = v["keywords"].as_array().unwrap();
+    assert!(keywords.len() <= 3);
+}
+
+#[test]
+fn keywords_empty_texts() {
+    let input = r#"{"texts": []}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["keywords"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn keywords_japanese() {
+    let input = r#"{"texts": ["メモリ機能はセッション間で教訓を引き継ぐ", "メモリ機能で過去の学びを保持する"], "top_n": 5}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let keywords = v["keywords"].as_array().unwrap();
+    assert!(!keywords.is_empty());
+}
+
+#[test]
+fn keywords_missing_texts() {
+    let input = r#"{"top_n": 5}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("texts"));
+}
+
+// ── diff ──
+
+#[test]
+fn diff_basic() {
+    let input = r#"{
+        "corpus_a": ["rust systems programming", "rust memory safety"],
+        "corpus_b": ["python data science", "python machine learning"]
+    }"#;
+    let (stdout, _, code) = run_cli("diff", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let a_dist = v["a_distinctive"].as_array().unwrap();
+    let b_dist = v["b_distinctive"].as_array().unwrap();
+    assert!(!a_dist.is_empty());
+    assert!(!b_dist.is_empty());
+    assert!(a_dist[0]["ratio"].as_f64().unwrap() > 1.0);
+}
+
+#[test]
+fn diff_identical_corpora() {
+    let input = r#"{
+        "corpus_a": ["hello world"],
+        "corpus_b": ["hello world"]
+    }"#;
+    let (stdout, _, code) = run_cli("diff", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["a_distinctive"].as_array().unwrap().is_empty());
+    assert!(v["b_distinctive"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn diff_with_top_n() {
+    let input = r#"{
+        "corpus_a": ["rust rust rust systems programming language compiler"],
+        "corpus_b": ["python python python data science machine learning"],
+        "top_n": 2
+    }"#;
+    let (stdout, _, code) = run_cli("diff", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["a_distinctive"].as_array().unwrap().len() <= 2);
+    assert!(v["b_distinctive"].as_array().unwrap().len() <= 2);
+}
+
+#[test]
+fn diff_missing_corpus_a() {
+    let input = r#"{"corpus_b": ["hello"]}"#;
+    let (stdout, _, code) = run_cli("diff", input);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("corpus_a"));
+}
+
+#[test]
+fn diff_missing_corpus_b() {
+    let input = r#"{"corpus_a": ["hello"]}"#;
+    let (stdout, _, code) = run_cli("diff", input);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("corpus_b"));
+}
+
+// ── tokenize n-gram ──
+
+#[test]
+fn tokenize_bigram() {
+    let input = r#"{"texts": ["hello world foo"], "ngram": 2}"#;
+    let (stdout, _, code) = run_cli("tokenize", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let tokens = v["tokens"][0].as_array().unwrap();
+    assert!(tokens.iter().any(|t| t.as_str() == Some("hello world")));
+    assert!(tokens.iter().any(|t| t.as_str() == Some("hello")));
+}
+
+#[test]
+fn tokenize_trigram() {
+    let input = r#"{"texts": ["hello world foo bar"], "ngram": 3}"#;
+    let (stdout, _, code) = run_cli("tokenize", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let tokens = v["tokens"][0].as_array().unwrap();
+    assert!(tokens.iter().any(|t| t.as_str() == Some("hello world foo")));
+}
+
+#[test]
+fn tokenize_ngram_default_is_unigram() {
+    let input_no_ngram = r#"{"texts": ["hello world"]}"#;
+    let input_ngram_1 = r#"{"texts": ["hello world"], "ngram": 1}"#;
+    let (out1, _, _) = run_cli("tokenize", input_no_ngram);
+    let (out2, _, _) = run_cli("tokenize", input_ngram_1);
+    assert_eq!(out1, out2);
+}
+
+#[test]
+fn tokenize_ngram_invalid_value() {
+    let input = r#"{"texts": ["hello"], "ngram": 5}"#;
+    let (stdout, _, code) = run_cli("tokenize", input);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("ngram"));
+}
+
+// ── sentiment ──
+
+#[test]
+fn sentiment_positive_english() {
+    let input = r#"{"texts": ["This is great and amazing work"]}"#;
+    let (stdout, _, code) = run_cli("sentiment", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let results = v["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["text_index"].as_u64().unwrap(), 0);
+    assert_eq!(results[0]["polarity"].as_str().unwrap(), "positive");
+    assert!(results[0]["confidence"].as_f64().unwrap() > 0.5);
+}
+
+#[test]
+fn sentiment_negative_english() {
+    let input = r#"{"texts": ["This is terrible and horrible"]}"#;
+    let (stdout, _, code) = run_cli("sentiment", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let results = v["results"].as_array().unwrap();
+    assert_eq!(results[0]["polarity"].as_str().unwrap(), "negative");
+}
+
+#[test]
+fn sentiment_neutral() {
+    let input = r#"{"texts": ["The function returns a value"]}"#;
+    let (stdout, _, code) = run_cli("sentiment", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let results = v["results"].as_array().unwrap();
+    assert_eq!(results[0]["polarity"].as_str().unwrap(), "neutral");
+}
+
+#[test]
+fn sentiment_japanese_positive() {
+    let input = r#"{"texts": ["素晴らしい機能で便利です"]}"#;
+    let (stdout, _, code) = run_cli("sentiment", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let results = v["results"].as_array().unwrap();
+    assert_eq!(results[0]["polarity"].as_str().unwrap(), "positive");
+}
+
+#[test]
+fn sentiment_japanese_negative() {
+    let input = r#"{"texts": ["バグが多くて不安定です"]}"#;
+    let (stdout, _, code) = run_cli("sentiment", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let results = v["results"].as_array().unwrap();
+    assert_eq!(results[0]["polarity"].as_str().unwrap(), "negative");
+}
+
+#[test]
+fn sentiment_batch() {
+    let input = r#"{"texts": ["great work", "terrible bug", "the code runs"]}"#;
+    let (stdout, _, code) = run_cli("sentiment", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let results = v["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0]["text_index"].as_u64().unwrap(), 0);
+    assert_eq!(results[1]["text_index"].as_u64().unwrap(), 1);
+    assert_eq!(results[2]["text_index"].as_u64().unwrap(), 2);
+}
+
+#[test]
+fn sentiment_empty_texts() {
+    let input = r#"{"texts": []}"#;
+    let (stdout, _, code) = run_cli("sentiment", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["results"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn sentiment_missing_texts() {
+    let input = r#"{}"#;
+    let (stdout, _, code) = run_cli("sentiment", input);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("texts"));
+}
+
 #[test]
 fn tokenize_non_string_element_treated_as_empty() {
     let input = r#"{"texts": [123, null, true]}"#;

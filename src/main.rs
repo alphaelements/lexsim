@@ -3,7 +3,9 @@ use std::process;
 
 use serde_json::Value;
 
-use lexsim::{content_hash, jaccard, tokenize, Corpus};
+use lexsim::{
+    analyze_sentiment, content_hash, corpus_diff, jaccard, tokenize, tokenize_ngrams, Corpus,
+};
 
 fn main() {
     let subcommand = match std::env::args().nth(1) {
@@ -19,6 +21,9 @@ fn main() {
         "jaccard" => run(cmd_jaccard),
         "bm25" => run(cmd_bm25),
         "hash" => run(cmd_hash),
+        "keywords" => run(cmd_keywords),
+        "diff" => run(cmd_diff),
+        "sentiment" => run(cmd_sentiment),
         _ => {
             print_usage();
             process::exit(2);
@@ -61,9 +66,22 @@ fn cmd_tokenize(input: &Value) -> Result<Value, String> {
         .and_then(|v| v.as_array())
         .ok_or("missing or invalid \"texts\" array")?;
 
+    let ngram = input.get("ngram").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+
+    if ngram == 0 || ngram > 3 {
+        return Err("\"ngram\" must be 1, 2, or 3".to_string());
+    }
+
     let tokens: Vec<Vec<String>> = texts
         .iter()
-        .map(|v| tokenize(v.as_str().unwrap_or("")))
+        .map(|v| {
+            let text = v.as_str().unwrap_or("");
+            if ngram <= 1 {
+                tokenize(text)
+            } else {
+                tokenize_ngrams(text, ngram)
+            }
+        })
         .collect();
 
     Ok(serde_json::json!({"tokens": tokens}))
@@ -125,16 +143,113 @@ fn cmd_hash(input: &Value) -> Result<Value, String> {
     Ok(serde_json::json!({"hashes": hashes}))
 }
 
+fn cmd_keywords(input: &Value) -> Result<Value, String> {
+    let texts = input
+        .get("texts")
+        .and_then(|v| v.as_array())
+        .ok_or("missing or invalid \"texts\" array")?;
+
+    let top_n = input.get("top_n").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+    let docs: Vec<String> = texts
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect();
+
+    let corpus = Corpus::build(&docs);
+    let keywords: Vec<Value> = corpus
+        .tfidf_keywords(top_n)
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "keyword": e.keyword,
+                "score": round6(e.score),
+                "count": e.count,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({"keywords": keywords}))
+}
+
+fn cmd_diff(input: &Value) -> Result<Value, String> {
+    let corpus_a = input
+        .get("corpus_a")
+        .and_then(|v| v.as_array())
+        .ok_or("missing or invalid \"corpus_a\" array")?;
+    let corpus_b = input
+        .get("corpus_b")
+        .and_then(|v| v.as_array())
+        .ok_or("missing or invalid \"corpus_b\" array")?;
+
+    let top_n = input.get("top_n").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+    let docs_a: Vec<String> = corpus_a
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect();
+    let docs_b: Vec<String> = corpus_b
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect();
+
+    let (a_dist, b_dist) = corpus_diff(&docs_a, &docs_b, top_n);
+
+    let a_json: Vec<Value> = a_dist
+        .into_iter()
+        .map(|e| serde_json::json!({"keyword": e.keyword, "ratio": round6(e.ratio)}))
+        .collect();
+    let b_json: Vec<Value> = b_dist
+        .into_iter()
+        .map(|e| serde_json::json!({"keyword": e.keyword, "ratio": round6(e.ratio)}))
+        .collect();
+
+    Ok(serde_json::json!({
+        "a_distinctive": a_json,
+        "b_distinctive": b_json,
+    }))
+}
+
+fn cmd_sentiment(input: &Value) -> Result<Value, String> {
+    let texts = input
+        .get("texts")
+        .and_then(|v| v.as_array())
+        .ok_or("missing or invalid \"texts\" array")?;
+
+    let results: Vec<Value> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let text = v.as_str().unwrap_or("");
+            let r = analyze_sentiment(text);
+            serde_json::json!({
+                "text_index": i,
+                "polarity": r.polarity.as_str(),
+                "confidence": round6(r.confidence),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({"results": results}))
+}
+
 fn round6(v: f64) -> f64 {
     (v * 1_000_000.0).round() / 1_000_000.0
 }
 
 fn print_usage() {
-    eprintln!("Usage: lexsim <tokenize|jaccard|bm25|hash>");
+    eprintln!("Usage: lexsim <subcommand>");
     eprintln!();
     eprintln!("Subcommands:");
-    eprintln!("  tokenize  Tokenize texts (stdin JSON → stdout JSON)");
-    eprintln!("  jaccard   Compute Jaccard similarity (stdin JSON → stdout JSON)");
-    eprintln!("  bm25      Compute BM25 scores (stdin JSON → stdout JSON)");
-    eprintln!("  hash      Compute content hashes (stdin JSON → stdout JSON)");
+    eprintln!("  tokenize   Tokenize texts (stdin JSON → stdout JSON)");
+    eprintln!("  jaccard    Compute Jaccard similarity (stdin JSON → stdout JSON)");
+    eprintln!("  bm25       Compute BM25 scores (stdin JSON → stdout JSON)");
+    eprintln!("  hash       Compute content hashes (stdin JSON → stdout JSON)");
+    eprintln!("  keywords   Extract top-N keywords by TF-IDF (stdin JSON → stdout JSON)");
+    eprintln!(
+        "  diff       Compare two corpora for distinctive keywords (stdin JSON → stdout JSON)"
+    );
+    eprintln!(
+        "  sentiment  Classify text sentiment as positive/neutral/negative (stdin JSON → stdout JSON)"
+    );
 }

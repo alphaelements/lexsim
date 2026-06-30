@@ -38,7 +38,7 @@ documents). Its only dependencies are `unicode-segmentation` and
 
 ```toml
 [dependencies]
-lexsim = "0.2"
+lexsim = "0.3"
 ```
 
 ## Usage
@@ -94,11 +94,15 @@ to stdout.
 cargo install lexsim --features cli
 ```
 
-Subcommands: `tokenize`, `jaccard`, `bm25`, `hash`.
+Subcommands: `tokenize`, `jaccard`, `bm25`, `hash`, `keywords`, `diff`,
+`sentiment`.
 
 ```sh
 echo '{"texts": ["hello world"]}' | lexsim tokenize
 # → {"tokens":[["hello","world",...]]}
+
+echo '{"texts": ["hello world foo"], "ngram": 2}' | lexsim tokenize
+# → includes bigrams: "hello world", "world foo"
 
 echo '{"a": "hello world", "b": "hello there"}' | lexsim jaccard
 # → {"score":0.6}
@@ -108,15 +112,27 @@ echo '{"corpus": ["atomic write", "cat mat"], "query": "atomic"}' | lexsim bm25
 
 echo '{"texts": ["hello world", "Hello World"]}' | lexsim hash
 # → {"hashes":["<same>","<same>"]}
+
+echo '{"texts": ["Rust systems", "Rust safety", "Python data"], "top_n": 3}' | lexsim keywords
+# → {"keywords":[{"keyword":"rust","score":0.11,"count":2}, ...]}
+
+echo '{"corpus_a": ["Rust systems"], "corpus_b": ["Python data"]}' | lexsim diff
+# → {"a_distinctive":[{"keyword":"rust","ratio":2.7}], "b_distinctive":[...]}
+
+echo '{"texts": ["This is great!", "Terrible bug"]}' | lexsim sentiment
+# → {"results":[{"text_index":0,"polarity":"positive","confidence":0.7}, ...]}
 ```
 
 ## Public API
 
 | Item | Purpose |
 |------|---------|
-| `tokenize` / `normalize` | dictionary-free, multilingual tokenizer (NFKC + UAX#29 + CJK bi-grams + CL-CnG) |
+| `tokenize` / `tokenize_ngrams` / `normalize` | dictionary-free, multilingual tokenizer (NFKC + UAX#29 + CJK bi-grams + CL-CnG) |
 | `jaccard` / `jaccard_sets` / `token_set` | symmetric set similarity for dedup |
 | `Corpus::build` / `Corpus::bm25_scores` | asymmetric BM25 ranking for retrieval |
+| `Corpus::tfidf_keywords` | TF-IDF top-N keyword extraction |
+| `corpus_diff` | compare two corpora for distinctive keywords |
+| `analyze_sentiment` | dictionary-based sentiment polarity classification (ja/en) |
 | `content_hash` / `fnv1a_hex` | stable content hashing for change detection |
 | `Scorer` / `LexicalScorer` | trait + lexical impl; lets an embedding-based scorer slot in later behind one call site |
 
