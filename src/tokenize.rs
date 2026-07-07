@@ -9,10 +9,12 @@
 //! 3. **Space-delimited scripts** (Latin, Cyrillic, Greek, …) → UAX#29 word
 //!    boundaries. `snake_case` / `kebab-case` / `camelCase` identifiers also emit
 //!    their sub-tokens so partial matches survive.
-//! 4. **Non-spacing scripts** (Han, Hiragana, Katakana, Hangul) → character
-//!    **bi-grams** (a trailing lone character becomes a unigram). This is the
-//!    same approach Apache Lucene's CJK analyzer uses: dictionary-free recall
-//!    for Japanese / Chinese / Korean.
+//! 4. **Non-spacing scripts** (Han, Hiragana, Katakana, Hangul) → segmented via
+//!    [`crate::segmenter::push_segmented_ja`]: Japanese runs (hiragana /
+//!    katakana / kanji) are split into words by a trained boundary model;
+//!    non-Japanese non-spacing runs (e.g. Hangul) and single-character runs
+//!    fall back to character bi-grams, the dictionary-free scheme Apache
+//!    Lucene's CJK analyzer uses.
 //! 5. Across the whole (normalized) text we additionally emit character
 //!    **3-grams** (CL-CnG: Cross-Language Character N-Gram), prefixed so they
 //!    never collide with word tokens. These pick up identifiers, proper nouns
@@ -28,9 +30,10 @@ const NGRAM_PREFIX: char = '\u{1}';
 /// Length of the cross-language character n-gram.
 const CL_NGRAM: usize = 3;
 
-/// Tokenize `text` into a flat list of tokens (words / CJK bigrams / CL-CnG
-/// trigrams). Order is deterministic; duplicates are kept (BM25 needs term
-/// frequencies). For set-based metrics (Jaccard) deduplicate downstream.
+/// Tokenize `text` into a flat list of tokens (words / segmented Japanese
+/// words / CL-CnG trigrams). Order is deterministic; duplicates are kept
+/// (BM25 needs term frequencies). For set-based metrics (Jaccard) deduplicate
+/// downstream.
 ///
 /// All emitted tokens are lowercased. NFKC normalization happens first, but
 /// case folding is deferred to token emission so that `camelCase` boundaries
@@ -47,7 +50,7 @@ pub fn tokenize(text: &str) -> Vec<String> {
                 push_word_tokens(segment.text, &mut out);
             }
             ScriptClass::NonSpacing => {
-                push_cjk_bigrams(segment.text, &mut out);
+                crate::segmenter::push_segmented_ja(segment.text, &mut out);
             }
             ScriptClass::Other => {}
         }
@@ -245,22 +248,6 @@ fn split_camel(s: &str) -> Vec<String> {
     pieces
 }
 
-/// Character bi-grams for non-spacing scripts; a trailing single char becomes a
-/// unigram so a one-character segment still produces a token.
-fn push_cjk_bigrams(text: &str, out: &mut Vec<String>) {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return;
-    }
-    if chars.len() == 1 {
-        out.push(chars[0].to_string());
-        return;
-    }
-    for window in chars.windows(2) {
-        out.push(window.iter().collect());
-    }
-}
-
 /// Cross-language character 3-grams over the whole normalized text. Whitespace
 /// is collapsed to a single marker so n-grams don't span large gaps but word
 /// boundaries still influence the grams. Each gram is namespaced by a prefix
@@ -341,13 +328,20 @@ mod tests {
     }
 
     #[test]
-    fn japanese_bigrams() {
-        // "メモリ機能" → bigrams メモ/モリ/リ機/機能
+    fn japanese_word_segmentation() {
+        // "メモリ機能" is segmented into words ("メモリ", "機能") by the
+        // learned boundary model, not fixed-length bigrams (spec §7.4).
         let toks = word_tokens("メモリ機能");
-        assert!(toks.contains(&"メモ".to_string()));
-        assert!(toks.contains(&"モリ".to_string()));
-        assert!(toks.contains(&"リ機".to_string()));
+        assert!(toks.contains(&"メモリ".to_string()));
         assert!(toks.contains(&"機能".to_string()));
+    }
+
+    #[test]
+    fn japanese_word_segmentation_memory_function() {
+        // Spec §7.4 recommended test, asserted directly against tokenize():
+        // "メモリ機能" → ["メモリ", "機能"] (order-preserving, no bigrams).
+        let toks = word_tokens("メモリ機能");
+        assert_eq!(toks, vec!["メモリ".to_string(), "機能".to_string()]);
     }
 
     #[test]
@@ -362,8 +356,9 @@ mod tests {
         let toks = word_tokens("atomic_write を使う");
         assert!(toks.contains(&"atomic".to_string()));
         assert!(toks.contains(&"write".to_string()));
-        // CJK part bigrams
-        assert!(toks.iter().any(|t| t == "使う" || t == "を使"));
+        // CJK part segmented by the learned Japanese boundary model (not
+        // fixed-length bigrams): "を使う" is emitted as one token.
+        assert!(toks.contains(&"を使う".to_string()));
     }
 
     #[test]
