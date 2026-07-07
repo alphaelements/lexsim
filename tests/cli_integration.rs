@@ -87,7 +87,7 @@ fn tokenize_japanese() {
     assert_eq!(code, 0);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let tokens = v["tokens"][0].as_array().unwrap();
-    assert!(tokens.iter().any(|t| t.as_str() == Some("メモ")));
+    assert!(tokens.iter().any(|t| t.as_str() == Some("メモリ")));
 }
 
 #[test]
@@ -339,6 +339,32 @@ fn keywords_japanese() {
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let keywords = v["keywords"].as_array().unwrap();
     assert!(!keywords.is_empty());
+    // Regression: particle-glued bigrams (の/は/を/で) must not leak into
+    // keyword output at the CLI-integration layer, not just the unit layer.
+    for kw in keywords {
+        let word = kw["keyword"].as_str().unwrap();
+        for particle in ["の", "は", "を", "で"] {
+            assert!(
+                !word.contains(particle),
+                "keyword {word:?} unexpectedly contains particle {particle:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn keywords_japanese_excludes_aux_glued_bigrams() {
+    // Regression test for the rework finding: auxiliary-verb fragments
+    // (した, from 降りました) must not leak into keyword output alongside
+    // genuine content words at the CLI-integration layer.
+    let input = r#"{"texts": ["昨日は雨が降りました", "今日も雨が降りました"], "top_n": 10}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let keywords = v["keywords"].as_array().unwrap();
+    assert!(!keywords.iter().any(|k| k["keyword"] == "した"));
+    assert!(keywords.iter().any(|k| k["keyword"] == "昨日"));
+    assert!(keywords.iter().any(|k| k["keyword"] == "今日"));
 }
 
 #[test]

@@ -77,7 +77,9 @@
 
 mod hash;
 mod score;
+pub mod segmenter;
 mod sentiment;
+mod stopwords;
 mod tokenize;
 
 pub use hash::{content_hash, fnv1a_hex};
@@ -85,6 +87,7 @@ pub use score::{
     corpus_diff, jaccard, jaccard_sets, token_set, Corpus, DistinctiveKeyword, KeywordEntry,
 };
 pub use sentiment::{analyze_sentiment, Polarity, SentimentResult};
+pub use stopwords::is_stopword;
 pub use tokenize::{is_cl_ngram, normalize, tokenize, tokenize_ngrams};
 
 /// Abstraction over "score these documents against this query". Today the only

@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::stopwords::is_stopword;
 use crate::tokenize::{is_cl_ngram, tokenize};
 
 /// A keyword with its TF-IDF score and raw count across the corpus.
@@ -134,7 +135,7 @@ impl Corpus {
         let mut global_tf: HashMap<&str, u32> = HashMap::new();
         for tf_map in &self.doc_tf {
             for (term, &count) in tf_map {
-                if !is_cl_ngram(term) {
+                if !is_cl_ngram(term) && !is_stopword(term) {
                     *global_tf.entry(term.as_str()).or_insert(0) += count;
                 }
             }
@@ -285,7 +286,7 @@ fn normalized_tf(docs: &[String]) -> HashMap<String, f64> {
 
     for doc in docs {
         for token in tokenize(doc) {
-            if is_cl_ngram(&token) {
+            if is_cl_ngram(&token) || is_stopword(&token) {
                 continue;
             }
             *counts.entry(token).or_insert(0) += 1;
@@ -458,6 +459,107 @@ mod tests {
         let corpus = Corpus::build(&docs);
         let kw = corpus.tfidf_keywords(10);
         assert!(!kw.is_empty());
+    }
+
+    #[test]
+    fn tfidf_keywords_excludes_stopwords() {
+        let docs = vec![
+            "この機能は便利です".to_string(),
+            "この機能は快適です".to_string(),
+        ];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(20);
+        // "です" is emitted as a standalone bi-gram token by the tokenizer and
+        // must be filtered out at the extraction stage as a stopword.
+        assert!(
+            !kw.iter().any(|k| k.keyword == "です"),
+            "keywords should not include the stopword です: {:?}",
+            kw.iter().map(|k| &k.keyword).collect::<Vec<_>>()
+        );
+        // Content word must still survive.
+        assert!(kw.iter().any(|k| k.keyword == "機能"));
+    }
+
+    #[test]
+    fn normalized_tf_excludes_stopwords() {
+        let docs = vec!["この機能は便利です".to_string()];
+        let tf = normalized_tf(&docs);
+        assert!(!tf.contains_key("です"));
+        assert!(tf.contains_key("機能"));
+    }
+
+    #[test]
+    fn tfidf_keywords_excludes_particle_contaminated_bigrams() {
+        // Regression test for the rework finding: unbroken Japanese sentences
+        // tokenize into an unbroken run of bigrams with no trailing unigram, so
+        // particles like は/の/で only ever appear glued to an adjacent content
+        // character (は便, の機, 能は, ...). An exact-match stopword list alone
+        // cannot catch these; the extraction stage must also drop bigrams where
+        // one side is a single-character particle.
+        let docs = vec![
+            "この機能は便利です".to_string(),
+            "この機能は快適です".to_string(),
+        ];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(10);
+        let keywords: Vec<&str> = kw.iter().map(|k| k.keyword.as_str()).collect();
+        for particle in ["の", "は", "を", "で"] {
+            assert!(
+                !keywords.iter().any(|k| k.contains(particle)),
+                "keyword {:?} unexpectedly contains particle {:?} in {:?}",
+                keywords.iter().find(|k| k.contains(particle)),
+                particle,
+                keywords
+            );
+        }
+        // Content words must still survive the stricter filter.
+        assert!(keywords.contains(&"機能"));
+    }
+
+    #[test]
+    fn normalized_tf_excludes_particle_contaminated_bigrams() {
+        let docs = vec!["メモリ機能はセッション間で教訓を引き継ぐ".to_string()];
+        let tf = normalized_tf(&docs);
+        for term in tf.keys() {
+            for particle in ["の", "は", "を", "で"] {
+                assert!(
+                    !term.contains(particle),
+                    "term {:?} unexpectedly contains particle {:?}",
+                    term,
+                    particle
+                );
+            }
+        }
+        assert!(tf.contains_key("メモ") || tf.contains_key("機能"));
+    }
+
+    #[test]
+    fn tfidf_keywords_excludes_aux_contaminated_bigrams() {
+        // Regression test for the rework finding: single-character auxiliary
+        // fragments (た/だ) were omitted from the bigram-glue filter, so
+        // "した" (し + auxiliary た, from 降りました) leaked into keyword
+        // output alongside genuine content words 昨日/今日.
+        //
+        // Note: "まし"/"りま" (interior fragments of the multi-character
+        // auxiliary ました that don't touch a single-char stopword on either
+        // side) are a structurally different, known limitation of the
+        // single-char bigram-glue heuristic and are intentionally out of
+        // scope here; see src/stopwords.rs module docs.
+        let docs = vec![
+            "昨日は雨が降りました".to_string(),
+            "今日も雨が降りました".to_string(),
+        ];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(10);
+        let keywords: Vec<&str> = kw.iter().map(|k| k.keyword.as_str()).collect();
+        assert!(
+            !keywords.contains(&"した"),
+            "keyword list unexpectedly contains auxiliary-glued bigram した: {:?}",
+            keywords
+        );
+        // Content words must still survive the stricter filter.
+        assert!(keywords.contains(&"昨日"));
+        assert!(keywords.contains(&"今日"));
     }
 
     #[test]
