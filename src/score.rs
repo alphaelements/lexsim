@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::stopwords::is_stopword;
 use crate::tokenize::{is_cl_ngram, tokenize};
 
 /// A keyword with its TF-IDF score and raw count across the corpus.
@@ -60,6 +61,10 @@ pub struct Corpus {
     doc_tf: Vec<HashMap<String, u32>>,
     /// Per-document length (total token count).
     doc_len: Vec<f64>,
+    /// Per-document ordered token stream (including CL-CnG). Needed for
+    /// order-sensitive extraction (co-occurrence windows); `doc_tf` alone
+    /// loses ordering.
+    doc_tokens: Vec<Vec<String>>,
     /// Document frequency: how many docs contain each term.
     df: HashMap<String, u32>,
     /// Mean document length.
@@ -74,6 +79,7 @@ impl Corpus {
     pub fn build(docs: &[String]) -> Self {
         let mut doc_tf = Vec::with_capacity(docs.len());
         let mut doc_len = Vec::with_capacity(docs.len());
+        let mut doc_tokens = Vec::with_capacity(docs.len());
         let mut df: HashMap<String, u32> = HashMap::new();
         let mut total_len = 0.0;
 
@@ -89,6 +95,7 @@ impl Corpus {
             doc_len.push(toks.len() as f64);
             total_len += toks.len() as f64;
             doc_tf.push(tf);
+            doc_tokens.push(toks);
         }
 
         let n = docs.len();
@@ -97,6 +104,7 @@ impl Corpus {
         Corpus {
             doc_tf,
             doc_len,
+            doc_tokens,
             df,
             avgdl,
             n,
@@ -134,7 +142,7 @@ impl Corpus {
         let mut global_tf: HashMap<&str, u32> = HashMap::new();
         for tf_map in &self.doc_tf {
             for (term, &count) in tf_map {
-                if !is_cl_ngram(term) {
+                if !is_cl_ngram(term) && !is_stopword(term) {
                     *global_tf.entry(term.as_str()).or_insert(0) += count;
                 }
             }
@@ -157,6 +165,87 @@ impl Corpus {
                 }
                 Some(KeywordEntry {
                     keyword: term.to_string(),
+                    score,
+                    count,
+                })
+            })
+            .collect();
+
+        entries.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        entries.truncate(top_n);
+        entries
+    }
+
+    /// Co-occurrence keywords: words that frequently appear together with a
+    /// query term within a context window of `window_size` word tokens.
+    ///
+    /// Algorithm: tokenize `query` to get seed terms (CL-CnG and stopwords
+    /// excluded); for each document, slide a window of `window_size` word
+    /// tokens (CL-CnG tokens excluded so the window is word-level, matching
+    /// the segmenter's real word tokens) and, whenever a window contains a
+    /// query term, count every other non-query, non-stopword term in that
+    /// window as one co-occurrence. The final score is
+    /// `co_occurrence_count * IDF(term)`, so terms that are both frequent
+    /// near the query *and* rare corpus-wide (hence topically distinctive)
+    /// rank highest. Returns the top `top_n` terms sorted by score
+    /// descending.
+    pub fn cooccurrence_keywords(
+        &self,
+        query: &str,
+        window_size: usize,
+        top_n: usize,
+    ) -> Vec<KeywordEntry> {
+        if self.n == 0 || window_size == 0 {
+            return Vec::new();
+        }
+
+        let query_terms: HashSet<String> = tokenize(query)
+            .into_iter()
+            .filter(|t| !is_cl_ngram(t) && !is_stopword(t))
+            .collect();
+        if query_terms.is_empty() {
+            return Vec::new();
+        }
+
+        // Co-occurrence is inherently order-sensitive, so it needs the
+        // original ordered token stream rather than the order-independent
+        // per-doc TF maps used by `tfidf_keywords`; that stream is retained
+        // in `self.doc_tokens`.
+        let mut cooc_count: HashMap<String, u32> = HashMap::new();
+        for tokens in &self.doc_tokens {
+            let word_tokens: Vec<&String> = tokens.iter().filter(|t| !is_cl_ngram(t)).collect();
+            if word_tokens.is_empty() {
+                continue;
+            }
+            for window in word_tokens.windows(window_size.max(1)) {
+                let has_query_term = window.iter().any(|t| query_terms.contains(t.as_str()));
+                if !has_query_term {
+                    continue;
+                }
+                for term in window {
+                    if query_terms.contains(term.as_str()) || is_stopword(term) {
+                        continue;
+                    }
+                    *cooc_count.entry(term.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut entries: Vec<KeywordEntry> = cooc_count
+            .into_iter()
+            .filter_map(|(term, count)| {
+                let df = *self.df.get(&term)? as f64;
+                let idf = ((self.n as f64 + 1.0) / df).ln();
+                let score = count as f64 * idf;
+                if score <= 0.0 {
+                    return None;
+                }
+                Some(KeywordEntry {
+                    keyword: term,
                     score,
                     count,
                 })
@@ -204,6 +293,114 @@ impl Corpus {
         }
         scores
     }
+}
+
+/// PageRank damping factor (standard TextRank default).
+const TEXTRANK_DAMPING: f64 = 0.85;
+/// Maximum PageRank iterations before giving up on convergence.
+const TEXTRANK_MAX_ITERATIONS: usize = 100;
+/// Convergence threshold: stop iterating once the largest per-node score
+/// change drops below this.
+const TEXTRANK_CONVERGENCE_THRESHOLD: f64 = 1e-6;
+
+/// Extract keywords using a simplified TextRank graph algorithm.
+///
+/// Builds an undirected co-occurrence graph from word tokens (CL-CnG tokens
+/// and stopwords excluded) within a sliding window of `window_size` tokens —
+/// two terms get an edge (weight = co-occurrence count) whenever they share
+/// a window — then runs PageRank-style iteration over that graph
+/// (damping=0.85, up to 100 iterations, convergence threshold 1e-6) to find
+/// the most central terms. Returns the top `top_n` terms by final score,
+/// descending.
+pub fn textrank_keywords(text: &str, window_size: usize, top_n: usize) -> Vec<KeywordEntry> {
+    let word_tokens: Vec<String> = tokenize(text)
+        .into_iter()
+        .filter(|t| !is_cl_ngram(t) && !is_stopword(t))
+        .collect();
+
+    if word_tokens.is_empty() {
+        return Vec::new();
+    }
+
+    // Term occurrence counts double as the KeywordEntry::count field.
+    let mut term_count: HashMap<&str, u32> = HashMap::new();
+    for t in &word_tokens {
+        *term_count.entry(t.as_str()).or_insert(0) += 1;
+    }
+
+    // Undirected weighted adjacency: edge weight = number of windows in
+    // which the two terms co-occur.
+    let mut adjacency: HashMap<&str, HashMap<&str, f64>> = HashMap::new();
+    let window = window_size.max(2);
+    if word_tokens.len() >= 2 {
+        for win in word_tokens.windows(window.min(word_tokens.len())) {
+            for i in 0..win.len() {
+                for j in (i + 1)..win.len() {
+                    let (a, b) = (win[i].as_str(), win[j].as_str());
+                    if a == b {
+                        continue;
+                    }
+                    *adjacency.entry(a).or_default().entry(b).or_insert(0.0) += 1.0;
+                    *adjacency.entry(b).or_default().entry(a).or_insert(0.0) += 1.0;
+                }
+            }
+        }
+    }
+
+    let terms: Vec<&str> = term_count.keys().copied().collect();
+    let n = terms.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let index: HashMap<&str, usize> = terms.iter().enumerate().map(|(i, &t)| (t, i)).collect();
+    let out_weight: Vec<f64> = terms
+        .iter()
+        .map(|t| adjacency.get(t).map(|nb| nb.values().sum()).unwrap_or(0.0))
+        .collect();
+
+    let mut scores = vec![1.0 / n as f64; n];
+    for _ in 0..TEXTRANK_MAX_ITERATIONS {
+        let mut next = vec![(1.0 - TEXTRANK_DAMPING) / n as f64; n];
+        for (i, &term) in terms.iter().enumerate() {
+            let Some(neighbors) = adjacency.get(term) else {
+                continue;
+            };
+            for (&nbr, &w) in neighbors {
+                let j = index[nbr];
+                if out_weight[j] > 0.0 {
+                    next[i] += TEXTRANK_DAMPING * scores[j] * w / out_weight[j];
+                }
+            }
+        }
+        let max_delta = next
+            .iter()
+            .zip(scores.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        scores = next;
+        if max_delta < TEXTRANK_CONVERGENCE_THRESHOLD {
+            break;
+        }
+    }
+
+    let mut entries: Vec<KeywordEntry> = terms
+        .iter()
+        .enumerate()
+        .map(|(i, &term)| KeywordEntry {
+            keyword: term.to_string(),
+            score: scores[i],
+            count: term_count[term],
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    entries.truncate(top_n);
+    entries
 }
 
 /// A keyword distinctive to one side of a corpus comparison.
@@ -285,7 +482,7 @@ fn normalized_tf(docs: &[String]) -> HashMap<String, f64> {
 
     for doc in docs {
         for token in tokenize(doc) {
-            if is_cl_ngram(&token) {
+            if is_cl_ngram(&token) || is_stopword(&token) {
                 continue;
             }
             *counts.entry(token).or_insert(0) += 1;
@@ -461,6 +658,107 @@ mod tests {
     }
 
     #[test]
+    fn tfidf_keywords_excludes_stopwords() {
+        let docs = vec![
+            "この機能は便利です".to_string(),
+            "この機能は快適です".to_string(),
+        ];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(20);
+        // "です" is emitted as a standalone bi-gram token by the tokenizer and
+        // must be filtered out at the extraction stage as a stopword.
+        assert!(
+            !kw.iter().any(|k| k.keyword == "です"),
+            "keywords should not include the stopword です: {:?}",
+            kw.iter().map(|k| &k.keyword).collect::<Vec<_>>()
+        );
+        // Content word must still survive.
+        assert!(kw.iter().any(|k| k.keyword == "機能"));
+    }
+
+    #[test]
+    fn normalized_tf_excludes_stopwords() {
+        let docs = vec!["この機能は便利です".to_string()];
+        let tf = normalized_tf(&docs);
+        assert!(!tf.contains_key("です"));
+        assert!(tf.contains_key("機能"));
+    }
+
+    #[test]
+    fn tfidf_keywords_excludes_particle_contaminated_bigrams() {
+        // Regression test for the rework finding: unbroken Japanese sentences
+        // tokenize into an unbroken run of bigrams with no trailing unigram, so
+        // particles like は/の/で only ever appear glued to an adjacent content
+        // character (は便, の機, 能は, ...). An exact-match stopword list alone
+        // cannot catch these; the extraction stage must also drop bigrams where
+        // one side is a single-character particle.
+        let docs = vec![
+            "この機能は便利です".to_string(),
+            "この機能は快適です".to_string(),
+        ];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(10);
+        let keywords: Vec<&str> = kw.iter().map(|k| k.keyword.as_str()).collect();
+        for particle in ["の", "は", "を", "で"] {
+            assert!(
+                !keywords.iter().any(|k| k.contains(particle)),
+                "keyword {:?} unexpectedly contains particle {:?} in {:?}",
+                keywords.iter().find(|k| k.contains(particle)),
+                particle,
+                keywords
+            );
+        }
+        // Content words must still survive the stricter filter.
+        assert!(keywords.contains(&"機能"));
+    }
+
+    #[test]
+    fn normalized_tf_excludes_particle_contaminated_bigrams() {
+        let docs = vec!["メモリ機能はセッション間で教訓を引き継ぐ".to_string()];
+        let tf = normalized_tf(&docs);
+        for term in tf.keys() {
+            for particle in ["の", "は", "を", "で"] {
+                assert!(
+                    !term.contains(particle),
+                    "term {:?} unexpectedly contains particle {:?}",
+                    term,
+                    particle
+                );
+            }
+        }
+        assert!(tf.contains_key("メモ") || tf.contains_key("機能"));
+    }
+
+    #[test]
+    fn tfidf_keywords_excludes_aux_contaminated_bigrams() {
+        // Regression test for the rework finding: single-character auxiliary
+        // fragments (た/だ) were omitted from the bigram-glue filter, so
+        // "した" (し + auxiliary た, from 降りました) leaked into keyword
+        // output alongside genuine content words 昨日/今日.
+        //
+        // Note: "まし"/"りま" (interior fragments of the multi-character
+        // auxiliary ました that don't touch a single-char stopword on either
+        // side) are a structurally different, known limitation of the
+        // single-char bigram-glue heuristic and are intentionally out of
+        // scope here; see src/stopwords.rs module docs.
+        let docs = vec![
+            "昨日は雨が降りました".to_string(),
+            "今日も雨が降りました".to_string(),
+        ];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.tfidf_keywords(10);
+        let keywords: Vec<&str> = kw.iter().map(|k| k.keyword.as_str()).collect();
+        assert!(
+            !keywords.contains(&"した"),
+            "keyword list unexpectedly contains auxiliary-glued bigram した: {:?}",
+            keywords
+        );
+        // Content words must still survive the stricter filter.
+        assert!(keywords.contains(&"昨日"));
+        assert!(keywords.contains(&"今日"));
+    }
+
+    #[test]
     fn corpus_diff_finds_distinctive_keywords() {
         let a = vec![
             "rust systems programming".to_string(),
@@ -491,5 +789,108 @@ mod tests {
         let (a_dist, b_dist) = corpus_diff(&[], &[], 10);
         assert!(a_dist.is_empty());
         assert!(b_dist.is_empty());
+    }
+
+    #[test]
+    fn cooccurrence_keywords_finds_context_terms() {
+        let docs = vec![
+            "メモリ機能はセッション間で教訓を保持する仕組みです".to_string(),
+            "ガントチャートは日程を表示する機能です".to_string(),
+        ];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.cooccurrence_keywords("メモリ", 4, 10);
+        assert!(!kw.is_empty(), "expected co-occurring terms near メモリ");
+        // Terms that share a window with the query term in doc 0 should
+        // surface (e.g. 機能/セッション/教訓), not unrelated doc-1-only terms.
+        assert!(kw
+            .iter()
+            .any(|k| k.keyword == "機能" || k.keyword == "セッション"));
+    }
+
+    #[test]
+    fn cooccurrence_keywords_excludes_query_term_and_stopwords() {
+        let docs = vec!["メモリ機能はセッション間で教訓を保持する仕組みです".to_string()];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.cooccurrence_keywords("メモリ", 4, 20);
+        assert!(
+            !kw.iter().any(|k| k.keyword == "メモリ"),
+            "query term must not co-occur with itself"
+        );
+        assert!(
+            !kw.iter().any(|k| is_stopword(&k.keyword)),
+            "stopwords must be excluded: {:?}",
+            kw.iter().map(|k| &k.keyword).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cooccurrence_keywords_respects_top_n() {
+        let docs = vec!["メモリ機能はセッション間で教訓を保持する仕組みです".to_string()];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.cooccurrence_keywords("メモリ", 4, 2);
+        assert!(kw.len() <= 2);
+    }
+
+    #[test]
+    fn cooccurrence_keywords_empty_corpus() {
+        let corpus = Corpus::build(&[]);
+        assert!(corpus.cooccurrence_keywords("query", 4, 10).is_empty());
+    }
+
+    #[test]
+    fn cooccurrence_keywords_no_match_is_empty() {
+        let docs = vec!["hello world rust programming".to_string()];
+        let corpus = Corpus::build(&docs);
+        let kw = corpus.cooccurrence_keywords("zzz_nonexistent", 4, 10);
+        assert!(kw.is_empty());
+    }
+
+    #[test]
+    fn textrank_keywords_extracts_central_terms() {
+        let text = "メモリ機能はセッション間で教訓を保持する。教訓はメモリ機能に蓄積される。";
+        let kw = textrank_keywords(text, 4, 10);
+        assert!(!kw.is_empty());
+        // 機能/メモリ/教訓 co-occur repeatedly and should rank as central terms.
+        assert!(kw
+            .iter()
+            .any(|k| k.keyword == "機能" || k.keyword == "メモリ" || k.keyword == "教訓"));
+    }
+
+    #[test]
+    fn textrank_keywords_excludes_cl_ngram_and_stopwords() {
+        let text = "この機能はとても便利です。この機能は快適です。".to_string();
+        let kw = textrank_keywords(&text, 4, 20);
+        for entry in &kw {
+            assert!(
+                !entry.keyword.starts_with('\u{1}'),
+                "CL-CnG leaked: {:?}",
+                entry.keyword
+            );
+            assert!(
+                !is_stopword(&entry.keyword),
+                "stopword leaked: {:?}",
+                entry.keyword
+            );
+        }
+    }
+
+    #[test]
+    fn textrank_keywords_respects_top_n() {
+        let text = "rust programming language systems memory safety concurrency performance";
+        let kw = textrank_keywords(text, 3, 3);
+        assert!(kw.len() <= 3);
+    }
+
+    #[test]
+    fn textrank_keywords_empty_text() {
+        assert!(textrank_keywords("", 4, 10).is_empty());
+    }
+
+    #[test]
+    fn textrank_keywords_single_word_no_panic() {
+        // A single content word has no co-occurrence window partner; must not
+        // panic and should still surface the lone term.
+        let kw = textrank_keywords("機能", 4, 10);
+        assert!(kw.iter().any(|k| k.keyword == "機能") || kw.is_empty());
     }
 }

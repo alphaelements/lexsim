@@ -65,7 +65,7 @@ fn tokenize_basic() {
     let tokens_outer = v["tokens"].as_array().unwrap();
     assert_eq!(tokens_outer.len(), 1);
     let tokens = tokens_outer[0].as_array().unwrap();
-    assert!(tokens.len() > 0);
+    assert!(!tokens.is_empty());
     assert!(tokens.iter().any(|t| t.as_str() == Some("hello")));
     assert!(tokens.iter().any(|t| t.as_str() == Some("world")));
 }
@@ -87,7 +87,7 @@ fn tokenize_japanese() {
     assert_eq!(code, 0);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let tokens = v["tokens"][0].as_array().unwrap();
-    assert!(tokens.iter().any(|t| t.as_str() == Some("メモ")));
+    assert!(tokens.iter().any(|t| t.as_str() == Some("メモリ")));
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn tokenize_returns_no_results_key() {
     assert!(v.get("results").is_none(), "should not have 'results' key");
     assert!(v.get("tokens").is_some(), "should have 'tokens' key");
     let tokens = v["tokens"][0].as_array().unwrap();
-    assert!(tokens.len() > 0);
+    assert!(!tokens.is_empty());
 }
 
 // ── keywords ──
@@ -339,6 +339,32 @@ fn keywords_japanese() {
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let keywords = v["keywords"].as_array().unwrap();
     assert!(!keywords.is_empty());
+    // Regression: particle-glued bigrams (の/は/を/で) must not leak into
+    // keyword output at the CLI-integration layer, not just the unit layer.
+    for kw in keywords {
+        let word = kw["keyword"].as_str().unwrap();
+        for particle in ["の", "は", "を", "で"] {
+            assert!(
+                !word.contains(particle),
+                "keyword {word:?} unexpectedly contains particle {particle:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn keywords_japanese_excludes_aux_glued_bigrams() {
+    // Regression test for the rework finding: auxiliary-verb fragments
+    // (した, from 降りました) must not leak into keyword output alongside
+    // genuine content words at the CLI-integration layer.
+    let input = r#"{"texts": ["昨日は雨が降りました", "今日も雨が降りました"], "top_n": 10}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let keywords = v["keywords"].as_array().unwrap();
+    assert!(!keywords.iter().any(|k| k["keyword"] == "した"));
+    assert!(keywords.iter().any(|k| k["keyword"] == "昨日"));
+    assert!(keywords.iter().any(|k| k["keyword"] == "今日"));
 }
 
 #[test]
@@ -348,6 +374,74 @@ fn keywords_missing_texts() {
     assert_eq!(code, 1);
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert!(v["error"].as_str().unwrap().contains("texts"));
+}
+
+#[test]
+fn keywords_method_tfidf_is_default() {
+    // Compare parsed keyword sets rather than raw stdout: entries tied on
+    // score are not guaranteed a stable relative order (HashMap iteration),
+    // so byte-for-byte stdout equality would be flaky.
+    let input = r#"{"texts": ["rust programming", "rust systems programming"]}"#;
+    let (stdout_default, _, code_default) = run_cli("keywords", input);
+    let input_explicit =
+        r#"{"texts": ["rust programming", "rust systems programming"], "method": "tfidf"}"#;
+    let (stdout_explicit, _, code_explicit) = run_cli("keywords", input_explicit);
+    assert_eq!(code_default, 0);
+    assert_eq!(code_explicit, 0);
+
+    let default_v: serde_json::Value = serde_json::from_str(&stdout_default).unwrap();
+    let explicit_v: serde_json::Value = serde_json::from_str(&stdout_explicit).unwrap();
+    let mut default_kw: Vec<&serde_json::Value> =
+        default_v["keywords"].as_array().unwrap().iter().collect();
+    let mut explicit_kw: Vec<&serde_json::Value> =
+        explicit_v["keywords"].as_array().unwrap().iter().collect();
+    let key_fn = |v: &&serde_json::Value| v["keyword"].as_str().unwrap().to_string();
+    default_kw.sort_by_key(key_fn);
+    explicit_kw.sort_by_key(key_fn);
+    assert_eq!(default_kw, explicit_kw);
+}
+
+#[test]
+fn keywords_method_textrank() {
+    let input = r#"{"texts": ["メモリ機能はセッション間で教訓を保持する。教訓はメモリ機能に蓄積される。"], "method": "textrank", "top_n": 10}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let keywords = v["keywords"].as_array().unwrap();
+    assert!(!keywords.is_empty());
+    for kw in keywords {
+        let k = kw["keyword"].as_str().unwrap();
+        assert!(!k.starts_with('\u{1}'), "CL-CnG leaked: {k:?}");
+    }
+}
+
+#[test]
+fn keywords_method_cooccurrence_requires_query() {
+    let input = r#"{"texts": ["rust programming language"], "method": "cooccurrence"}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("query"));
+}
+
+#[test]
+fn keywords_method_cooccurrence() {
+    let input = r#"{"texts": ["メモリ機能はセッション間で教訓を保持する仕組みです"], "method": "cooccurrence", "query": "メモリ", "top_n": 10}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let keywords = v["keywords"].as_array().unwrap();
+    assert!(!keywords.is_empty());
+    assert!(!keywords.iter().any(|k| k["keyword"] == "メモリ"));
+}
+
+#[test]
+fn keywords_method_unknown_is_error() {
+    let input = r#"{"texts": ["hello world"], "method": "bogus"}"#;
+    let (stdout, _, code) = run_cli("keywords", input);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("method"));
 }
 
 // ── diff ──

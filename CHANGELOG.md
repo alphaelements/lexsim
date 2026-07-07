@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- **Hybrid word segmenter** for Japanese: AdaBoost model (42 features, 2 KB
+  embedded binary) trained on 1,276 diverse sentences replaces character-bigram
+  tokenization — dramatically improves recall for BM25, Jaccard, and keyword
+  extraction on Japanese content
+- **Japanese stopword filter** (`is_stopword`): 180+ particles, auxiliaries,
+  demonstratives, conjunctions, and adverbs; also filters particle/auxiliary-
+  contaminated bigrams
+- **TextRank keyword extraction** (`textrank_keywords`): graph-based single-text
+  keyword extraction using co-occurrence windows
+- **Co-occurrence keyword extraction** (`Corpus::cooccurrence_keywords`):
+  find terms that frequently co-occur with a query term across a corpus
+- **Normalized TF** (`Corpus::normalized_tf`): length-normalized term frequency
+  with stopword exclusion
+- `segmenter` module exposed as public API for advanced use (AdaBoost training,
+  binary model format, feature extraction, inference)
+- Criterion benchmarks for tokenize/jaccard/BM25 performance budgets
+- Training infrastructure: `train_segmenter` example, `eval_segmenter` example,
+  seed corpus (`training/seed_corpus.txt`)
+
+### Changed
+
+- **Breaking (tokenizer output):** Japanese text now produces word-level tokens
+  instead of character bigrams. Downstream BM25 scores and Jaccard coefficients
+  will differ from v0.3 — values improve in quality but are not numerically
+  compatible
+- Verb conjugation forms (e.g. "食べ", "食べる", "食べた") are merged into base
+  form tokens for better recall
+- Package description updated to reflect hybrid segmentation and TextRank
+
+## 0.3.0
+
+### Added
+
+- `keywords` CLI subcommand (TF-IDF top-N keyword extraction)
+- `diff` CLI subcommand (compare two corpora for distinctive keywords)
+- `sentiment` CLI subcommand (dictionary-based ja/en sentiment polarity)
+- `Corpus::tfidf_keywords` and `corpus_diff` library functions
+- `analyze_sentiment` library function
+- `tokenize_ngrams` for n-gram tokenization
+
 ## 0.2.1
 
 ### Changed

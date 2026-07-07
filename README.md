@@ -6,7 +6,8 @@
 [![license](https://img.shields.io/crates/l/lexsim.svg)](#license)
 
 A **dictionary-free, multilingual lexical similarity engine** for Rust:
-tokenize + Jaccard + BM25 + a stable content hash, sharing one tokenizer.
+tokenize + Jaccard + BM25 + TextRank + a stable content hash, sharing one
+tokenizer.
 
 It answers two questions with the same notion of "term":
 
@@ -15,30 +16,41 @@ It answers two questions with the same notion of "term":
 - **"Is this relevant to that?"** → `Corpus::bm25_scores` (asymmetric ranking) —
   pull the items relevant to a query.
 
-Plus `content_hash` for change-detection / re-injection tracking.
+Plus `content_hash` for change-detection / re-injection tracking, and
+`textrank_keywords` / `tfidf_keywords` / `corpus_diff` for keyword extraction.
+
+## Hybrid word segmentation (v0.4)
+
+Since v0.4, Japanese text is segmented at the **word level** using a built-in
+AdaBoost model trained on 1,276 diverse sentences — no external dictionary
+required. This replaces the character-bigram approach used in earlier versions,
+dramatically improving recall for BM25, Jaccard, and keyword extraction on
+Japanese content.
+
+For non-CJK scripts, UAX#29 word boundaries are used as before.
 
 ## Why dictionary-free
 
 Morphological dictionaries (e.g. for Japanese) are multi-megabyte and
-language-specific. `lexsim` instead combines Unicode-standard techniques:
+language-specific. `lexsim` instead combines:
 
+- **AdaBoost word segmenter** (2 KB embedded model) for Japanese, trained on a
+  curated 1,276-sentence corpus with 42-feature extraction,
 - **UAX#29 word boundaries** for space-delimited scripts,
-- **CJK character bi-grams** (the Apache Lucene approach) for non-spacing scripts
-  (Japanese / Chinese / Korean),
 - **NFKC normalization** to unify full/half-width and variant forms,
 - **CL-CnG** (Cross-Language Character N-Grams) so identifiers, proper nouns, and
   spelling variants match across languages.
 
-The result reaches dictionary-like recall with **zero dictionary**, in
+The result reaches dictionary-like recall with **zero external dictionary**, in
 sub-millisecond time for the corpus sizes this targets (tens to hundreds of short
-documents). Its only dependencies are `unicode-segmentation` and
+documents). Its only runtime dependencies are `unicode-segmentation` and
 `unicode-normalization`.
 
 ## Install
 
 ```toml
 [dependencies]
-lexsim = "0.3"
+lexsim = "0.4"
 ```
 
 ## Usage
@@ -127,13 +139,16 @@ echo '{"texts": ["This is great!", "Terrible bug"]}' | lexsim sentiment
 
 | Item | Purpose |
 |------|---------|
-| `tokenize` / `tokenize_ngrams` / `normalize` | dictionary-free, multilingual tokenizer (NFKC + UAX#29 + CJK bi-grams + CL-CnG) |
+| `tokenize` / `tokenize_ngrams` / `normalize` | dictionary-free, multilingual tokenizer (NFKC + UAX#29 + hybrid word segmentation + CL-CnG) |
 | `jaccard` / `jaccard_sets` / `token_set` | symmetric set similarity for dedup |
 | `Corpus::build` / `Corpus::bm25_scores` | asymmetric BM25 ranking for retrieval |
 | `Corpus::tfidf_keywords` | TF-IDF top-N keyword extraction |
+| `textrank_keywords` | graph-based TextRank keyword extraction (single-text) |
 | `corpus_diff` | compare two corpora for distinctive keywords |
 | `analyze_sentiment` | dictionary-based sentiment polarity classification (ja/en) |
 | `content_hash` / `fnv1a_hex` | stable content hashing for change detection |
+| `is_stopword` | Japanese stopword filter (particles, auxiliaries, demonstratives) |
+| `segmenter` | AdaBoost-based Japanese word segmenter (public module for advanced use) |
 | `Scorer` / `LexicalScorer` | trait + lexical impl; lets an embedding-based scorer slot in later behind one call site |
 
 ## Future extension

@@ -261,11 +261,20 @@ pub fn analyze_sentiment(text: &str) -> SentimentResult {
         let is_pos = pos_en.contains(token.as_str()) || contains_any(token, pos_ja);
         let is_neg = neg_en.contains(token.as_str()) || contains_any(token, neg_ja);
 
-        // When a token matches both polarities (e.g. CJK bigram "安定" appears
-        // in positive "安定" and as substring of negative "不安定"), cancel out.
-        if is_pos && !is_neg {
+        if is_pos && is_neg {
+            // When a token matches both polarities, prefer the longer
+            // dictionary match — "不安定" (neg, 3 chars) beats "安定"
+            // (pos, 2 chars) because the longer match is more specific.
+            let pos_len = longest_match_len(token, pos_en, pos_ja);
+            let neg_len = longest_match_len(token, neg_en, neg_ja);
+            if neg_len > pos_len {
+                negative_count += 1;
+            } else if pos_len > neg_len {
+                positive_count += 1;
+            }
+        } else if is_pos {
             positive_count += 1;
-        } else if is_neg && !is_pos {
+        } else if is_neg {
             negative_count += 1;
         }
     }
@@ -309,6 +318,21 @@ pub fn analyze_sentiment(text: &str) -> SentimentResult {
 fn contains_any(token: &str, dict: &HashSet<String>) -> bool {
     dict.iter()
         .any(|w| token.contains(w.as_str()) || w.contains(token))
+}
+
+fn longest_match_len(token: &str, en_dict: &HashSet<String>, ja_dict: &HashSet<String>) -> usize {
+    let en_max = if en_dict.contains(token) {
+        token.len()
+    } else {
+        0
+    };
+    let ja_max = ja_dict
+        .iter()
+        .filter(|w| token.contains(w.as_str()) || w.contains(token))
+        .map(|w| w.len())
+        .max()
+        .unwrap_or(0);
+    en_max.max(ja_max)
 }
 
 #[cfg(test)]
