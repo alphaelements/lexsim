@@ -1,30 +1,34 @@
 //! Japanese stopword filtering for the extraction stage (TF-IDF keywords /
-//! corpus diff). This is **not** applied inside [`crate::tokenize::tokenize`]
-//! itself — the tokenizer's BM25 term-frequency contract must stay untouched,
-//! so filtering only happens where keywords are surfaced to a human.
+//! corpus diff / co-occurrence / TextRank). This is **not** applied inside
+//! [`crate::tokenize::tokenize`] itself — the tokenizer's BM25
+//! term-frequency contract must stay untouched, so filtering only happens
+//! where keywords are surfaced to a human.
 //!
-//! Because the tokenizer emits CJK text as character bi-grams (see
-//! `tokenize.rs`), single-character function words (助詞 like `の`/`に`/`は`,
-//! and single-character 助動詞 fragments like `た`/`だ`) rarely appear as their
-//! own token: an unbroken Japanese sentence tokenizes into one continuous run
-//! of overlapping bigrams with no trailing unigram at all, so a particle or
-//! auxiliary fragment only ever shows up glued to an adjacent content
-//! character (`は便`, `の機`, `能は`, `した`, ...). An exact-match lookup against
-//! the whole token therefore only catches two cases: a lone trailing function
-//! word in an odd-length run, and a multi-character auxiliary sequence
-//! (`です`/`ます`/`ない`/...) that exactly fills a bigram. To also catch the
-//! common "function word glued to a bigram" case, [`is_stopword`] additionally
-//! treats a two-character token as a stopword when either of its two
-//! characters is a single-character particle or auxiliary — the same
-//! characters already listed as ADP/AUX entries in [`JA_STOPWORDS`].
+//! Japanese runs are now segmented into real words by a trained boundary
+//! model (see `segmenter/`), so most particles and auxiliaries already
+//! appear as clean standalone tokens (`は`, `の`, `です`, `ました`, ...) and
+//! are caught by a plain exact-match lookup against [`JA_STOPWORDS`] — which
+//! now also lists whole-word conjunctions/adverbs (`しかし`, `つまり`, ...)
+//! and demonstratives (`これ`, `その`, ...) the segmenter emits as single
+//! tokens.
 //!
-//! **Known limitation**: this only closes the *edge* of a multi-character
-//! auxiliary sequence (the bigram touching `た`/`だ`, e.g. `した` from
-//! `ました`). *Interior* bigrams of a multi-character auxiliary that don't
-//! touch any single-char stopword on either side (e.g. `まし`/`りま`, also
-//! from `ました`) are not caught by this heuristic and would need a
-//! different approach (matching against known multi-character auxiliary
-//! sequences rather than single characters) to close fully.
+//! A **secondary bigram-glue heuristic** is kept for backward compatibility:
+//! non-Japanese non-spacing scripts (e.g. Hangul) and single-character runs
+//! still fall back to character bi-grams (see `tokenize.rs`), where a
+//! single-character particle or auxiliary fragment shows up glued to an
+//! adjacent character (`は便`, `の機`, `した`, ...). [`is_stopword`] treats a
+//! two-character token as a stopword when either of its two characters is a
+//! single-character particle or auxiliary — the same characters already
+//! listed as ADP/AUX entries in [`JA_STOPWORDS`].
+//!
+//! **Known limitation**: for the bigram fallback path, this only closes the
+//! *edge* of a multi-character auxiliary sequence (the bigram touching
+//! `た`/`だ`, e.g. `した` from `ました`). *Interior* bigrams of a
+//! multi-character auxiliary that don't touch any single-char stopword on
+//! either side (e.g. `まし`/`りま`, also from `ました`) are not caught by
+//! this heuristic and would need a different approach (matching against
+//! known multi-character auxiliary sequences rather than single characters)
+//! to close fully.
 
 use std::collections::HashSet;
 
@@ -109,6 +113,34 @@ const JA_STOPWORDS: &[&str] = &[
     "ところ",
     "ほう",
     "わけ",
+    // Conjunctions/adverbs (接続詞・副詞): the trained boundary segmenter now
+    // emits these as standalone word tokens (they used to only show up glued
+    // inside CJK bigrams), so they need an exact-match entry to be filtered.
+    "また",
+    "そして",
+    "しかし",
+    "ただし",
+    "つまり",
+    "なお",
+    "ただ",
+    "さらに",
+    "および",
+    "または",
+    // Demonstratives (指示語)
+    "この",
+    "その",
+    "あの",
+    "どの",
+    "これ",
+    "それ",
+    "あれ",
+    "ここ",
+    "そこ",
+    // Generic time/manner adverbs (too generic to carry topical signal)
+    "とても",
+    "かなり",
+    "すべて",
+    "すぐ",
 ];
 
 /// Single-character particles (係助詞・格助詞・終助詞) and single-character
@@ -218,12 +250,51 @@ mod tests {
 
     #[test]
     fn stopword_list_size_is_in_guideline_range() {
-        // Guideline: 50〜80 words (deduplicated).
+        // Guideline: 50〜110 words (deduplicated). The trained boundary
+        // segmenter now emits real word tokens (conjunctions, demonstratives,
+        // generic adverbs) that previously only ever appeared glued inside
+        // bigrams, so the word-level list grew accordingly.
         let unique: HashSet<&str> = JA_STOPWORDS.iter().copied().collect();
         assert!(
-            unique.len() >= 50 && unique.len() <= 80,
-            "stopword list has {} unique entries, expected 50..=80",
+            unique.len() >= 50 && unique.len() <= 110,
+            "stopword list has {} unique entries, expected 50..=110",
             unique.len()
         );
+    }
+
+    #[test]
+    fn conjunctions_and_adverbs_are_stopwords() {
+        // The segmenter now emits these as standalone word tokens; they must
+        // be filtered at the extraction stage (little topical signal).
+        for w in [
+            "また",
+            "そして",
+            "しかし",
+            "ただし",
+            "つまり",
+            "なお",
+            "ただ",
+            "さらに",
+            "および",
+            "または",
+        ] {
+            assert!(is_stopword(w), "{w:?} should be a stopword");
+        }
+    }
+
+    #[test]
+    fn demonstratives_are_stopwords() {
+        for w in [
+            "この", "その", "あの", "どの", "これ", "それ", "あれ", "ここ", "そこ",
+        ] {
+            assert!(is_stopword(w), "{w:?} should be a stopword");
+        }
+    }
+
+    #[test]
+    fn generic_adverbs_are_stopwords() {
+        for w in ["とても", "かなり", "すべて", "すぐ"] {
+            assert!(is_stopword(w), "{w:?} should be a stopword");
+        }
     }
 }

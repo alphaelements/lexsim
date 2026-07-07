@@ -84,7 +84,8 @@ mod tokenize;
 
 pub use hash::{content_hash, fnv1a_hex};
 pub use score::{
-    corpus_diff, jaccard, jaccard_sets, token_set, Corpus, DistinctiveKeyword, KeywordEntry,
+    corpus_diff, jaccard, jaccard_sets, textrank_keywords, token_set, Corpus, DistinctiveKeyword,
+    KeywordEntry,
 };
 pub use sentiment::{analyze_sentiment, Polarity, SentimentResult};
 pub use stopwords::is_stopword;

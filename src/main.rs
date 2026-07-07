@@ -4,7 +4,8 @@ use std::process;
 use serde_json::Value;
 
 use lexsim::{
-    analyze_sentiment, content_hash, corpus_diff, jaccard, tokenize, tokenize_ngrams, Corpus,
+    analyze_sentiment, content_hash, corpus_diff, jaccard, textrank_keywords, tokenize,
+    tokenize_ngrams, Corpus,
 };
 
 fn main() {
@@ -143,6 +144,10 @@ fn cmd_hash(input: &Value) -> Result<Value, String> {
     Ok(serde_json::json!({"hashes": hashes}))
 }
 
+/// Default word-window size for context-aware extraction methods
+/// (co-occurrence / TextRank).
+const DEFAULT_WINDOW_SIZE: usize = 4;
+
 fn cmd_keywords(input: &Value) -> Result<Value, String> {
     let texts = input
         .get("texts")
@@ -150,15 +155,41 @@ fn cmd_keywords(input: &Value) -> Result<Value, String> {
         .ok_or("missing or invalid \"texts\" array")?;
 
     let top_n = input.get("top_n").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let method = input
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("tfidf");
+    let window_size = input
+        .get("window_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_WINDOW_SIZE as u64) as usize;
 
     let docs: Vec<String> = texts
         .iter()
         .map(|v| v.as_str().unwrap_or("").to_string())
         .collect();
 
-    let corpus = Corpus::build(&docs);
-    let keywords: Vec<Value> = corpus
-        .tfidf_keywords(top_n)
+    let entries = match method {
+        "tfidf" => Corpus::build(&docs).tfidf_keywords(top_n),
+        "textrank" => {
+            let combined = docs.join("\n");
+            textrank_keywords(&combined, window_size, top_n)
+        }
+        "cooccurrence" => {
+            let query = input
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or("\"cooccurrence\" method requires a \"query\" string")?;
+            Corpus::build(&docs).cooccurrence_keywords(query, window_size, top_n)
+        }
+        other => {
+            return Err(format!(
+            "unknown \"method\" {other:?}: expected \"tfidf\", \"textrank\", or \"cooccurrence\""
+        ))
+        }
+    };
+
+    let keywords: Vec<Value> = entries
         .into_iter()
         .map(|e| {
             serde_json::json!({
@@ -245,7 +276,9 @@ fn print_usage() {
     eprintln!("  jaccard    Compute Jaccard similarity (stdin JSON → stdout JSON)");
     eprintln!("  bm25       Compute BM25 scores (stdin JSON → stdout JSON)");
     eprintln!("  hash       Compute content hashes (stdin JSON → stdout JSON)");
-    eprintln!("  keywords   Extract top-N keywords by TF-IDF (stdin JSON → stdout JSON)");
+    eprintln!(
+        "  keywords   Extract top-N keywords (stdin JSON → stdout JSON); \"method\": \"tfidf\" (default) | \"textrank\" | \"cooccurrence\" (requires \"query\")"
+    );
     eprintln!(
         "  diff       Compare two corpora for distinctive keywords (stdin JSON → stdout JSON)"
     );
