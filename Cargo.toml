@@ -28,3 +28,8 @@ serde_json = "1"
 name = "lexsim"
 path = "src/main.rs"
 required-features = ["cli"]
+
+[[example]]
+name = "train_segmenter"
+path = "examples/train_segmenter.rs"
+required-features = ["cli"]
