@@ -145,7 +145,7 @@ fn classify(c: char) -> ScriptClass {
 
 /// True for scripts written without spaces between words, where dictionary-free
 /// recall is best served by character n-grams. Ranges per the Unicode blocks.
-fn is_non_spacing_script(c: char) -> bool {
+pub(crate) fn is_non_spacing_script(c: char) -> bool {
     matches!(c as u32,
         0x3040..=0x309F   // Hiragana
         | 0x30A0..=0x30FF // Katakana

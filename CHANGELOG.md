@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- **`estimate_tokens(text: &str) -> usize`** — a cheap, dependency-free
+  estimate of how many model tokens a string would consume, for callers that
+  need to stay within a token budget without invoking a real tokenizer.
+  Heuristic: ASCII characters count at ~4 chars/token, CJK characters
+  (Hiragana/Katakana/Han/Hangul) count at ~1.5 chars/token, and everything
+  else (other scripts, emoji, symbols) counts at the ASCII rate. This is an
+  approximation, not an exact model-tokenizer count.
+
 ## 0.5.1
 
 ### Fixed

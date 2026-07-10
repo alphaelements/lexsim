@@ -68,6 +68,17 @@
 //! assert!(corpus.bm25_scores("メモリ atomic_write")[0] > 0.0);
 //! ```
 //!
+//! [`estimate_tokens`] gives a cheap, dependency-free token-count estimate
+//! (ASCII ≈ 4 chars/token, CJK ≈ 1.5 chars/token) for callers that need to
+//! stay within a token budget without invoking a real model tokenizer:
+//!
+//! ```
+//! use lexsim::estimate_tokens;
+//!
+//! assert!(estimate_tokens("hello world") > 0);
+//! assert!(estimate_tokens("") == 0);
+//! ```
+//!
 //! # Future extension
 //!
 //! Purely lexical matching is weak on *cross-language synonyms* (the same idea
@@ -81,6 +92,7 @@ pub mod segmenter;
 mod sentiment;
 mod stopwords;
 mod tokenize;
+mod tokens;
 
 pub use hash::{content_hash, fnv1a_hex};
 pub use score::{
@@ -90,6 +102,7 @@ pub use score::{
 pub use sentiment::{analyze_sentiment, Polarity, SentimentResult};
 pub use stopwords::is_stopword;
 pub use tokenize::{is_cl_ngram, normalize, tokenize, tokenize_ngrams};
+pub use tokens::estimate_tokens;
 
 /// Abstraction over "score these documents against this query". Today the only
 /// implementation is lexical BM25 ([`LexicalScorer`]); the trait exists so an
@@ -147,5 +160,6 @@ mod tests {
         let _ = token_set("a b c");
         let c = Corpus::build(&["a b".to_string()]);
         let _ = c.bm25_scores("a");
+        let _ = estimate_tokens("a b c");
     }
 }
