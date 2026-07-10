@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.1
+
+### Fixed
+
+- **`なく` is now a stopword.** 0.5.0 excluded it on the mistaken assumption
+  that it only ever merges into `なくなった`. It does not: the segmenter emits
+  it standalone in `問題 なく 動作`, `仕方 なく 実行` and `時間 が なく なった`
+  (6 standalone occurrences in the training corpus). The adjectival `少なく` and
+  the kanji-spelled `無く` / `無くした` are separate tokens and are unaffected.
+
+`content_hash` is unchanged — the segmenter is untouched and stopwords only
+apply at the extraction stage.
+
 ## 0.5.0
 
 ### ⚠ Breaking

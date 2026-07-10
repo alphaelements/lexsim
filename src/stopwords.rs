@@ -106,6 +106,10 @@ const JA_STOPWORDS: &[&str] = &[
     "ません",
     "ない",
     "なかっ",
+    // 否定・様態の連用形。`問題 なく 動作`, `仕方 なく 実行`, `時間 が なく なった`
+    // のように独立トークンで現れる（コーパス上 6 例）。漢字表記の `無く…` と
+    // 形容詞連用形の `少なく` は別トークンなので内容語は失われない。
+    "なく",
     "た",
     "だ",
     "だっ",
@@ -364,20 +368,39 @@ mod tests {
         // `した` is the 10th most frequent token in `training/seed_corpus.txt`
         // (207 occurrences) — more frequent than `する` (141) and `して` (96),
         // both of which were already listed.
-        for w in ["した", "して", "よる", "など", "とか", "ぜひ", "かも"] {
+        //
+        // `なく` is the negative/adverbial form the segmenter splits off in
+        // `問題 なく 動作`, `仕方 なく 実行`, `時間 が なく なった` (6 standalone
+        // occurrences in the corpus). 0.5.0 wrongly assumed it only ever merged
+        // into `なくなった` and left it out.
+        for w in [
+            "した", "して", "よる", "など", "とか", "ぜひ", "かも", "なく",
+        ] {
             assert!(is_stopword(w), "{w} should be a stopword");
         }
     }
 
     #[test]
+    fn naku_as_a_stopword_does_not_swallow_content_words() {
+        // `なく` is only a stopword as an exact whole token. The adjectival
+        // `少なく` and the kanji-spelled `無く…` are separate tokens and must
+        // survive keyword extraction.
+        assert!(!is_stopword("少なく"));
+        assert!(!is_stopword("無く"));
+        assert!(!is_stopword("無くした"));
+    }
+
+    #[test]
     fn merged_conjugations_are_not_expected_as_standalone_tokens() {
-        // x-metrics' referral also asked for `でし` / `なっ` / `なく` / `たい`
-        // / `んだ`. The segmenter never emits those as word tokens — they are
-        // merged into `でした` / `なった` / `なくなった` / `試したい` — so they
-        // are deliberately *not* added to `JA_STOPWORDS`. Adding them would be
-        // dead weight, and `なく` in particular would risk filtering the
-        // adverbial `無く`. This test documents that decision.
-        for w in ["でし", "なっ", "なく", "たい", "んだ"] {
+        // x-metrics' referral also asked for `でし` / `なっ` / `たい` / `んだ`.
+        // The segmenter never emits those as word tokens — they are merged into
+        // `でした` (or split as `で` + `した`), `なった`, `試したい`, `読んだ` —
+        // so they are deliberately *not* added to `JA_STOPWORDS`. Adding them
+        // would be dead weight. This test documents that decision.
+        //
+        // (`なく` was in this list until 0.5.1; it *does* appear standalone —
+        // see `naku_as_a_stopword_does_not_swallow_content_words`.)
+        for w in ["でし", "なっ", "たい", "んだ"] {
             assert!(!is_stopword(w), "{w} should not be a stopword");
         }
         // `だろう` (not the fragment `だろ`) is what the segmenter emits.
