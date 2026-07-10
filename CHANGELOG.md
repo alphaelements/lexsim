@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.1
+
+### Fixed
+
+- **`is_stopword` false positives/negatives in the two-character bigram
+  heuristic**: the fallback heuristic (for the CJK bigram-glue path used only
+  by non-Japanese-script runs, e.g. Hangul) previously fired on *any*
+  two-character token containing a single-character particle/auxiliary,
+  including real Japanese-script content words that happen to share a
+  character with a particle (e.g. `はし` 橋/箸, `すし` 寿司, `たこ` 蛸/凧
+  were incorrectly filtered out as stopwords). It also missed the auxiliary
+  fragment `す` (trailing character of `です`/`ます`), so fragments like
+  glued `す`-bigrams leaked into keyword output. Fixed structurally: the
+  heuristic now only fires when the token is *not* entirely Japanese-script
+  (hiragana/katakana/kanji) — a bigram of two Japanese-script characters is
+  never produced by the fallback path in the first place (Japanese-script
+  runs of length ≥2 are always routed through the trained boundary
+  segmenter), so it should never have been treated as a stopword by this
+  heuristic. `stopwords.rs` now delegates the Japanese-script check to
+  `segmenter::inference::is_japanese_run_char` directly instead of
+  maintaining a separate Unicode range table, eliminating drift risk between
+  the two. Reported by x-metrics.
+
 ## 0.4.0
 
 ### Added
