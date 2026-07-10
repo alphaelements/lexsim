@@ -11,8 +11,7 @@
 //! bigram scheme, since the model was only ever trained on Japanese-run
 //! boundary candidates (see the segmenter design spec §2.2, §3.5).
 //!
-//! Not yet wired into `tokenize()` — see the segmenter design spec's phased
-//! rollout (this lands in a later phase).
+//! Called by `tokenize()` for every non-spacing script run (`src/tokenize.rs`).
 
 use super::features::{classify_char, extract_features, CharClass, PriorDecision};
 use super::MODEL;

@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.5.0
+
+### ⚠ Breaking
+
+- **`content_hash` values change.** The boundary segmenter was retrained (see
+  *Fixed* below), so `tokenize()` emits different tokens for some inputs and
+  every `content_hash` derived from them changes. Downstream deduplication
+  caches keyed on `content_hash` are invalidated and will re-hash on first
+  use. No API signature changed.
+
+### Fixed
+
+- **`is_stopword` missed single-character function words.** `is_stopword("す")`
+  and `is_stopword("や")` returned `false`. `JA_SINGLE_CHAR_FUNCTION_CHARS` is
+  consulted *only* for two-character tokens, so listing a character there has
+  no effect on a lone one-character token — it must be in `JA_STOPWORDS`.
+  (The 0.4.1 entry below claims this fragment was handled; it was not. The
+  heuristic it fixed never applied to single-character tokens.) Added the
+  function words the trained segmenter actually emits standalone: `す`, `や`,
+  `した`, `して`, `など`, `とか`, `かも`, `よる`, `ぜひ`. Reported by x-metrics.
+
+- **Segmenter over-split `漢字 + です` and `漢字 + たち`.** `これは記事です`
+  segmented as `["これ","は","記事","で","す"]` and `子供たち` as
+  `["子供","た","ち"]`. The training corpus contained `です` only after a
+  hiragana stem (`幸い です`) and `たち` only once (`人たち`), and the model's
+  features are character-class n-grams with no lexicon — so the unseen
+  `漢字|で` and `漢字|た` junctions scored as boundaries. Added
+  `training/context_supplement.txt` covering the missing left contexts and
+  retrained. `これは記事です` → `["これ","は","記事","です"]`,
+  `子供たち` → `["子供たち"]`.
+
+  Known limitation: `可愛い` still splits as `可愛` + `い`. Adding examples did
+  not fix it and cost boundary precision, so it was left alone; the stem
+  `可愛` survives as a content word. `高い`/`美しい` and other adjectives are
+  unaffected. Likewise `人々` → `人` + `々` and `原因は設定ミスです` →
+  `設定` + `ミス` are pre-existing splits, unchanged by this release.
+
+- **`examples/eval_segmenter.rs` reported misleading accuracy.** It rebuilt
+  each gold sentence with `words.concat()`, which deletes the spaces between
+  ASCII words and fed the segmenter input `tokenize()` never produces
+  (`"Cannotread"` → shredded into character bigrams). It reported word F1
+  0.5492 for a model whose real accuracy on the Japanese runs it actually sees
+  is boundary F1 0.9041 / word F1 0.8065. Scoring now extracts maximal
+  all-Japanese-script spans, matching how `tokenize()` feeds the segmenter.
+
+### Added
+
+- **`segmenter::eval`**: boundary- and word-level Precision/Recall/F1 of the
+  embedded model against a gold wakachi corpus, shared by
+  `examples/eval_segmenter.rs` and the new regression gate.
+
+- **`tests/segmenter_quality.rs`**: fails if segmentation accuracy regresses
+  below the pinned floors, plus behavioural tests pinning the `です` / `たち` /
+  サ変 `した` / inflected-verb segmentations so a retrain cannot silently undo
+  them.
+
 ## 0.4.1
 
 ### Fixed

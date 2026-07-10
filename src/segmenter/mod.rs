@@ -7,8 +7,8 @@
 //! them. [`binary`] and the embedded [`MODEL`] are the runtime side: the
 //! trained model is encoded to a fixed-length binary format, baked into the
 //! crate with `include_bytes!`, and exposed as a zero-copy [`binary::ModelView`].
-//! The tokenizer itself does not call into the segmenter yet (that wiring
-//! lands in a later phase per the segmenter design spec).
+//! `src/tokenize.rs` calls [`push_segmented_ja`] for every non-spacing script
+//! run it finds.
 //!
 //! Sub-modules:
 //! - [`features`]: litsea-style 8-class character classification + the
@@ -19,13 +19,18 @@
 //!   Japanese run extraction, and boundary-label generation.
 //! - [`binary`]: fixed-length binary model encoder/decoder (no `serde`
 //!   dependency), used to bake the trained model into the crate binary.
-//! - [`inference`]: runtime Japanese-run segmentation using [`MODEL`], with a
+//! - [`inference`]: runtime Japanese-run segmentation using [`MODEL`], called
+//!   by `tokenize()` for every hiragana/katakana/kanji run, with a
 //!   character-bigram fallback for non-Japanese non-spacing scripts (Hangul,
-//!   etc.). Not yet wired into `tokenize()`.
+//!   etc.).
+//! - [`eval`]: word- and boundary-level P/R/F1 of the runtime model against a
+//!   gold wakachi corpus, shared by `examples/eval_segmenter.rs` and the
+//!   `tests/segmenter_quality.rs` regression gate.
 
 pub mod adaboost;
 pub mod binary;
 pub mod corpus;
+pub mod eval;
 pub mod features;
 pub mod inference;
 

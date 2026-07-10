@@ -94,6 +94,10 @@ const JA_STOPWORDS: &[&str] = &[
     "ので",
     "ては",
     "では",
+    // Coordinating / exemplifying particles the segmenter emits standalone.
+    "や",
+    "など",
+    "とか",
     // AUX (助動詞)
     "です",
     "ます",
@@ -114,14 +118,31 @@ const JA_STOPWORDS: &[&str] = &[
     "そう",
     "だろう",
     "でしょう",
+    // Single-character auxiliary the segmenter emits when it mis-splits `です`
+    // into `で` + `す` (see x-metrics referral ref-20260710-060424-851178046).
+    // `JA_SINGLE_CHAR_FUNCTION_CHARS` is a two-character-token heuristic and
+    // never fires for a lone `す`, so it must be listed here.
+    "す",
+    "かも",
     // Other function words (軽動詞・形式名詞など)
     "する",
     "し",
+    // サ変名詞 + `する` is still split by the segmenter (`実施` + `した`), so
+    // these auxiliary fragments surface as standalone word tokens. `した` is
+    // the 10th most frequent token in the training corpus (207 occurrences).
+    "した",
+    "して",
     "さ",
     "され",
     "でき",
     "なる",
     "なり",
+    // 動詞「因る」の連体形。コーパス上、独立トークンとして現れる「よる」10 例は
+    // すべて `に よる` の機能語用法。名詞の「夜」は漢字表記でのみ現れる（独立
+    // トークン 6 例）ため、ひらがな「よる」を落としても内容語は失われない。
+    // 方言の進行相（`落ちよる` `鳴りよる` 等 4 例）は動詞語幹に膠着した 3 文字
+    // 以上のトークンなので、この 2 文字 exact-match には掛からない。
+    "よる",
     "ある",
     "あり",
     "いる",
@@ -162,6 +183,7 @@ const JA_STOPWORDS: &[&str] = &[
     "かなり",
     "すべて",
     "すぐ",
+    "ぜひ",
 ];
 
 /// Single-character particles (係助詞・格助詞・終助詞) and single-character
@@ -299,7 +321,68 @@ mod tests {
         assert!(!is_stopword("いす")); // 椅子 (chair) — ends with す
         assert!(!is_stopword("たこ")); // 蛸・凧 (octopus/kite) — starts with た
         assert!(!is_stopword("のり")); // 海苔・糊 (seaweed/glue) — starts with の
-        assert!(!is_stopword("よる")); // 夜 (night) — starts with よ
+                                       // `よる` used to be the `よ`-initial witness here, but it is now an
+                                       // exact `JA_STOPWORDS` entry (`〜による`) and would short-circuit on the
+                                       // exact match before ever reaching the heuristic. `よこ` restores that
+                                       // coverage: `よ` *is* in `JA_SINGLE_CHAR_FUNCTION_CHARS`, so this
+                                       // asserts the all-Japanese-script early return wins over the heuristic.
+        assert!(!is_stopword("よこ")); // 横 (side) — starts with よ
+        assert!(!is_stopword("ゆり")); // 百合 (lily) — neither char is a function char
+    }
+
+    #[test]
+    fn single_character_function_words_are_stopwords() {
+        // `JA_SINGLE_CHAR_FUNCTION_CHARS` is a *two-character-token* heuristic
+        // and is never consulted for a one-character token, so single-char
+        // function words must be listed in `JA_STOPWORDS` to be filtered.
+        // Reported by x-metrics referral ref-20260710-060424-851178046: the
+        // segmenter emits a lone `す` (from `です` split as `で` + `す`) and a
+        // lone `や` (the coordinating particle in `猫や犬`).
+        assert!(is_stopword("す"));
+        assert!(is_stopword("や"));
+    }
+
+    #[test]
+    fn single_char_stopwords_do_not_leak_into_two_char_content_words() {
+        // Adding `す` to `JA_STOPWORDS` must not make two-character content
+        // words containing it stopwords: the exact-match lookup is
+        // whole-token, and the bigram heuristic never fires on an
+        // all-Japanese-script bigram.
+        assert!(!is_stopword("すし")); // 寿司 (sushi)
+        assert!(!is_stopword("いす")); // 椅子 (chair)
+        assert!(!is_stopword("やま")); // 山 (mountain) — starts with や
+        assert!(!is_stopword("つや")); // 艶 (gloss) — ends with や
+    }
+
+    #[test]
+    fn conjugation_fragments_the_segmenter_actually_emits_are_stopwords() {
+        // The trained segmenter keeps inflected verb forms as single tokens
+        // (commit 846c779), but a サ変 noun + `する` conjugation is still split
+        // (`実施` + `した`, `変更` + `して`), leaving these auxiliary fragments
+        // as standalone word tokens. They carry no topical signal.
+        //
+        // `した` is the 10th most frequent token in `training/seed_corpus.txt`
+        // (207 occurrences) — more frequent than `する` (141) and `して` (96),
+        // both of which were already listed.
+        for w in ["した", "して", "よる", "など", "とか", "ぜひ", "かも"] {
+            assert!(is_stopword(w), "{w} should be a stopword");
+        }
+    }
+
+    #[test]
+    fn merged_conjugations_are_not_expected_as_standalone_tokens() {
+        // x-metrics' referral also asked for `でし` / `なっ` / `なく` / `たい`
+        // / `んだ`. The segmenter never emits those as word tokens — they are
+        // merged into `でした` / `なった` / `なくなった` / `試したい` — so they
+        // are deliberately *not* added to `JA_STOPWORDS`. Adding them would be
+        // dead weight, and `なく` in particular would risk filtering the
+        // adverbial `無く`. This test documents that decision.
+        for w in ["でし", "なっ", "なく", "たい", "んだ"] {
+            assert!(!is_stopword(w), "{w} should not be a stopword");
+        }
+        // `だろう` (not the fragment `だろ`) is what the segmenter emits.
+        assert!(is_stopword("だろう"));
+        assert!(!is_stopword("だろ"));
     }
 
     #[test]
@@ -318,14 +401,20 @@ mod tests {
 
     #[test]
     fn stopword_list_size_is_in_guideline_range() {
-        // Guideline: 50〜110 words (deduplicated). The trained boundary
-        // segmenter now emits real word tokens (conjunctions, demonstratives,
-        // generic adverbs) that previously only ever appeared glued inside
-        // bigrams, so the word-level list grew accordingly.
+        // Guideline: 50〜130 words (deduplicated). The upper bound exists to
+        // catch the list turning into an ever-growing denylist of whatever
+        // word most recently leaked into someone's keyword output — the
+        // whack-a-mole failure mode that motivated making the bigram
+        // heuristic structural (referral ref-20260710-012108-589608700). It is
+        // not a hard budget: raise it deliberately when the segmenter starts
+        // emitting a new *class* of function word, as happened when the
+        // trained boundary model began producing standalone conjunctions,
+        // demonstratives and adverbs, and again when サ変 auxiliary fragments
+        // (`した`, `して`) were added.
         let unique: HashSet<&str> = JA_STOPWORDS.iter().copied().collect();
         assert!(
-            unique.len() >= 50 && unique.len() <= 110,
-            "stopword list has {} unique entries, expected 50..=110",
+            unique.len() >= 50 && unique.len() <= 130,
+            "stopword list has {} unique entries, expected 50..=130",
             unique.len()
         );
     }
