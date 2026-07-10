@@ -21,7 +21,7 @@ use super::MODEL;
 /// segmenter operates on (hiragana, katakana, kanji incl. kanji numerals).
 /// Matches `segmenter::corpus`'s training-time definition of a "Japanese run"
 /// so inference-time behavior matches what the model was trained on.
-fn is_japanese_run_char(c: char) -> bool {
+pub(crate) fn is_japanese_run_char(c: char) -> bool {
     matches!(
         classify_char(c),
         CharClass::Hiragana | CharClass::Katakana | CharClass::Kanji | CharClass::KanjiNumeral

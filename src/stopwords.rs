@@ -12,23 +12,44 @@
 //! and demonstratives (`これ`, `その`, ...) the segmenter emits as single
 //! tokens.
 //!
-//! A **secondary bigram-glue heuristic** is kept for backward compatibility:
-//! non-Japanese non-spacing scripts (e.g. Hangul) and single-character runs
-//! still fall back to character bi-grams (see `tokenize.rs`), where a
-//! single-character particle or auxiliary fragment shows up glued to an
-//! adjacent character (`は便`, `の機`, `した`, ...). [`is_stopword`] treats a
-//! two-character token as a stopword when either of its two characters is a
-//! single-character particle or auxiliary — the same characters already
-//! listed as ADP/AUX entries in [`JA_STOPWORDS`].
+//! A **secondary bigram-glue heuristic** is kept for the CJK bigram fallback
+//! path (see `segmenter/inference.rs`'s `push_bigrams`), which only fires for
+//! non-Japanese-script non-spacing scripts (Hangul, unclassified CJK-adjacent
+//! blocks, etc.) — a run of hiragana / katakana / kanji is always routed
+//! through the trained boundary segmenter instead, never through the bigram
+//! fallback. So the only bigrams this heuristic actually needs to catch are
+//! ones that mix a Japanese function character with *any* non-Japanese-script
+//! character — Hangul, Latin, digits, punctuation, not just Hangul (`は<hangul>`,
+//! `Aた`, `の。`, ...) — a bigram of two Japanese-script characters is never
+//! produced by the fallback path in the first place, so [`is_stopword`] does
+//! not fire on one. This also sidesteps the false-positive class that
+//! motivated this restriction: two-character *Japanese-script* content words
+//! (`はし` 橋/箸, `にわ` 庭, `すし` 寿司, ...) are never touched by the
+//! heuristic, because both of their characters are Japanese-script.
+//!
+//! "Japanese-script" here means exactly what
+//! [`crate::segmenter::inference::is_japanese_run_char`] (and transitively
+//! `segmenter::features::classify_char`) considers Japanese for segmentation
+//! purposes — this module calls that same function rather than
+//! re-implementing the Unicode ranges, so the two can never drift apart.
+//!
+//! `is_stopword` is also `pub` and may be called directly by downstream
+//! crates on arbitrary strings, not just crate-internal tokenizer output — a
+//! Japanese-script-only bigram like `はし` must stay safe there too, which is
+//! exactly what this restriction guarantees regardless of caller.
+//!
+//! Reported by x-metrics referral ref-20260710-012108-589608700: the
+//! `JA_SINGLE_CHAR_FUNCTION_CHARS` bigram heuristic was previously
+//! unconditional and flagged Japanese-script content words like `はし` as
+//! stopwords.
 //!
 //! **Known limitation**: for the bigram fallback path, this only closes the
 //! *edge* of a multi-character auxiliary sequence (the bigram touching
-//! `た`/`だ`, e.g. `した` from `ました`). *Interior* bigrams of a
-//! multi-character auxiliary that don't touch any single-char stopword on
-//! either side (e.g. `まし`/`りま`, also from `ました`) are not caught by
-//! this heuristic and would need a different approach (matching against
-//! known multi-character auxiliary sequences rather than single characters)
-//! to close fully.
+//! `た`/`だ`/`す`, e.g. a fallback bigram touching the tail of `ました`).
+//! *Interior* bigrams of a multi-character auxiliary that don't touch any
+//! single-char stopword on either side are not caught by this heuristic and
+//! would need a different approach (matching against known multi-character
+//! auxiliary sequences rather than single characters) to close fully.
 
 use std::collections::HashSet;
 
@@ -154,7 +175,7 @@ const JA_SINGLE_CHAR_FUNCTION_CHARS: &[char] = &[
     // ADP (助詞)
     'の', 'に', 'は', 'を', 'が', 'で', 'と', 'も', 'へ', 'か', 'ね', 'よ', 'な', 'わ', 'ぞ', 'ぜ',
     // AUX (助動詞): 単独では滅多に出ないが、隣接文字と結合したbigramに現れる
-    'た', 'だ',
+    'た', 'だ', 'す',
 ];
 
 /// Returns `true` if `token` is a Japanese stopword (functional word with
@@ -164,10 +185,16 @@ const JA_SINGLE_CHAR_FUNCTION_CHARS: &[char] = &[
 /// Two checks are combined:
 /// 1. Exact match against [`JA_STOPWORDS`] (catches lone trailing particles
 ///    and multi-character auxiliaries that exactly fill a token).
-/// 2. For a two-character token, either character being a single-character
-///    particle or auxiliary fragment (see [`JA_SINGLE_CHAR_FUNCTION_CHARS`])
-///    — catches the common case where the CJK bigram tokenizer glues a
-///    particle or auxiliary fragment to a content/auxiliary character.
+/// 2. For a two-character token that is *not* entirely Japanese-script
+///    (hiragana/katakana/kanji, per
+///    [`crate::segmenter::inference::is_japanese_run_char`]), either
+///    character being a single-character particle or auxiliary fragment
+///    (see [`JA_SINGLE_CHAR_FUNCTION_CHARS`]) — catches the CJK bigram
+///    fallback path gluing a particle/auxiliary fragment to a
+///    non-Japanese-script character (Hangul, Latin, digits, punctuation,
+///    ...). A bigram of two Japanese-script characters is always produced by
+///    the trained segmenter, never the bigram fallback, so it is never
+///    treated as a stopword by this heuristic — see module docs.
 pub fn is_stopword(token: &str) -> bool {
     static STOPWORDS: std::sync::LazyLock<HashSet<&'static str>> =
         std::sync::LazyLock::new(|| JA_STOPWORDS.iter().copied().collect());
@@ -177,6 +204,12 @@ pub fn is_stopword(token: &str) -> bool {
 
     let chars: Vec<char> = token.chars().collect();
     if chars.len() == 2 {
+        if chars
+            .iter()
+            .all(|&c| crate::segmenter::inference::is_japanese_run_char(c))
+        {
+            return false;
+        }
         return chars
             .iter()
             .any(|c| JA_SINGLE_CHAR_FUNCTION_CHARS.contains(c));
@@ -220,14 +253,15 @@ mod tests {
     }
 
     #[test]
-    fn particle_glued_bigrams_are_stopwords() {
-        // The CJK bigram tokenizer glues a single-character particle to an
-        // adjacent content character in unbroken sentences (no trailing
-        // unigram to catch); is_stopword must still flag these bigrams.
-        assert!(is_stopword("は便")); // trailing 便 + leading は
-        assert!(is_stopword("の機")); // trailing 機 + leading の
-        assert!(is_stopword("能は")); // 能 + trailing は
-        assert!(is_stopword("を引")); // を + 引
+    fn particle_glued_to_non_japanese_script_bigrams_are_stopwords() {
+        // The bigram fallback path only ever fires when a Japanese-script
+        // sub-run is a single character, or on non-Japanese-script runs
+        // (Hangul, etc.) — see `segmenter::inference::push_bigrams`. So the
+        // only bigrams the heuristic actually needs to catch mix a Japanese
+        // function character with a non-Japanese-script character.
+        assert!(is_stopword("は가")); // は + Hangul 가
+        assert!(is_stopword("나の")); // Hangul 나 + の
+        assert!(is_stopword("を나")); // を + Hangul 나
     }
 
     #[test]
@@ -238,14 +272,48 @@ mod tests {
     }
 
     #[test]
-    fn aux_glued_bigrams_are_stopwords() {
-        // The CJK bigram tokenizer glues a single-character auxiliary (た/だ)
-        // to an adjacent content character just like it does for particles;
-        // is_stopword must flag these auxiliary-fragment bigrams too, or
-        // fragments like "した" (from 降りました) leak into keyword output.
-        assert!(is_stopword("した")); // し + た (auxiliary た)
-        assert!(is_stopword("んだ")); // ん + だ (auxiliary だ)
+    fn aux_glued_to_non_japanese_script_bigrams_are_stopwords() {
+        // Same as particle_glued_to_non_japanese_script_bigrams_are_stopwords
+        // but for the single-character auxiliary fragments (た/だ/す).
+        assert!(is_stopword("た가")); // auxiliary た + Hangul 가
+        assert!(is_stopword("나だ")); // Hangul 나 + auxiliary だ
+        assert!(is_stopword("す가")); // auxiliary す + Hangul 가
         assert!(is_stopword("だっ")); // already an exact JA_STOPWORDS entry
+    }
+
+    #[test]
+    fn japanese_script_only_bigrams_are_never_flagged_by_the_heuristic() {
+        // Two-character tokens where both characters are Japanese-script
+        // (hiragana/katakana/kanji) are always produced by the trained
+        // boundary segmenter, never the bigram fallback path (which only
+        // fires on non-Japanese-script runs) — so the bigram heuristic must
+        // never flag them, even when a character happens to also be a
+        // single-character particle/auxiliary fragment. Reported by
+        // x-metrics referral ref-20260710-012108-589608700 (e.g. "はし"
+        // 橋/箸 was being incorrectly filtered out as a stopword).
+        assert!(!is_stopword("はし")); // 橋・箸 (bridge/chopsticks) — starts with は
+        assert!(!is_stopword("にわ")); // 庭 (garden) — starts with に
+        assert!(!is_stopword("かに")); // 蟹 (crab) — ends with に
+        assert!(!is_stopword("なわ")); // 縄 (rope) — starts with な
+        assert!(!is_stopword("すし")); // 寿司 (sushi) — starts with す
+        assert!(!is_stopword("いす")); // 椅子 (chair) — ends with す
+        assert!(!is_stopword("たこ")); // 蛸・凧 (octopus/kite) — starts with た
+        assert!(!is_stopword("のり")); // 海苔・糊 (seaweed/glue) — starts with の
+        assert!(!is_stopword("よる")); // 夜 (night) — starts with よ
+    }
+
+    #[test]
+    fn is_stopword_uses_the_segmenters_japanese_script_definition() {
+        // is_stopword must agree with is_japanese_run_char on every script
+        // block it considers Japanese, including the less common ones
+        // (Katakana Phonetic Extensions, CJK Compatibility Ideographs) — a
+        // hand-duplicated Unicode range table here would risk drifting from
+        // the segmenter's actual definition and reintroducing false
+        // positives on those blocks. Calling
+        // `segmenter::inference::is_japanese_run_char` directly (rather than
+        // re-implementing the ranges) is what this test guards.
+        assert!(!is_stopword("すㇰ")); // す + Katakana Phonetic Extension (U+31F0)
+        assert!(!is_stopword("は\u{F900}")); // は + CJK Compatibility Ideograph (U+F900 豈)
     }
 
     #[test]
