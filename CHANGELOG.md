@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.2
+
+### Fixed
+
+- **`でし` is now a stopword.** The colloquial sentence-final `でし` (truncated
+  `でした`) is emitted as a standalone token whenever a Japanese run ends at
+  punctuation, ASCII, emoji, or end-of-text: `そうでし！` => `[そう, でし]`,
+  `やったでし♪` => `[やった, でし]`. The hiragana spelling of 弟子 is extremely
+  rare (kanji is standard); no real-corpus collision observed.
+
+  `content_hash` is unchanged — stopwords only apply at the extraction stage.
+
+- **Rustdoc warnings resolved.** Fixed 7 `rustdoc::private_intra_doc_links`
+  warnings where public documentation linked to private items (`JA_STOPWORDS`,
+  `JA_SINGLE_CHAR_FUNCTION_CHARS`, `is_japanese_run_char`, `PAD_CLASS`,
+  `MODEL_BYTES`).
+
 ## 0.6.1
 
 ### ⚠ Breaking

@@ -42,7 +42,7 @@ fn is_japanese_run_char(c: char) -> bool {
 /// space-separated tokens become gold `+1` (boundary) labels, and all other
 /// intra-token character gaps become `-1` (no boundary) labels. Only gaps that
 /// fall entirely within a contiguous Japanese run (see
-/// [`is_japanese_run_char`]) are emitted — this mirrors the runtime's
+/// `is_japanese_run_char`) are emitted — this mirrors the runtime's
 /// hybrid design where the learned model is applied only to Japanese runs.
 pub fn load_corpus(text: &str) -> Vec<Instance> {
     let mut instances = Vec::new();
