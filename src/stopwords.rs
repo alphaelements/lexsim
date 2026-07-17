@@ -121,6 +121,12 @@ const JA_STOPWORDS: &[&str] = &[
     "らしい",
     "そう",
     "だろう",
+    // 口語の文末 `だろ`（`だろう` の縮約）。日本語ランは記号・ASCII・絵文字・
+    // 文末で途切れるため、`これはバグだろ！` => [これ, は, バグ, だろ],
+    // `そうだろ？` => [そう, だろ], `無理だろw` => [無理, だろ, w] のように
+    // 独立トークンで現れる（x-metrics 実測: 口語ツイート 12 件中 9 件で
+    // キーワード出力に漏出）。`だろ` と一致する内容語は存在しない。
+    "だろ",
     "でしょう",
     // Single-character auxiliary the segmenter emits when it mis-splits `です`
     // into `で` + `す` (see x-metrics referral ref-20260710-060424-851178046).
@@ -391,21 +397,52 @@ mod tests {
     }
 
     #[test]
+    fn daro_is_a_stopword() {
+        // Sentence-final colloquial `だろ` (plain-form conjecture, the
+        // truncated `だろう`) is emitted as a standalone token whenever the
+        // Japanese run ends at punctuation / ASCII / emoji / end-of-text:
+        // `これはバグだろ！` => [これ, は, バグ, だろ], `そうだろ？` =>
+        // [そう, だろ], `無理だろw` => [無理, だろ, w]. Reported by x-metrics
+        // (leaks in 9/12 natural colloquial tweets); prose-only probes miss
+        // this because prose rarely ends a run right after `だろ`.
+        assert!(is_stopword("だろ"));
+        // The full form the segmenter emits mid-prose stays covered too.
+        assert!(is_stopword("だろう"));
+    }
+
+    #[test]
+    fn daro_as_a_stopword_does_not_swallow_content_words() {
+        // `だろ` is only a stopword as an exact whole token. No Japanese
+        // content word is spelled exactly `だろ`, and nearby two-character
+        // Japanese-script content words are untouched (exact match +
+        // all-Japanese-script bigrams never reach the heuristic).
+        assert!(!is_stopword("ころ")); // 頃 (time/around)
+        assert!(!is_stopword("どろ")); // 泥 (mud)
+        assert!(!is_stopword("だるま")); // 達磨 (daruma)
+    }
+
+    #[test]
     fn merged_conjugations_are_not_expected_as_standalone_tokens() {
         // x-metrics' referral also asked for `でし` / `なっ` / `たい` / `んだ`.
-        // The segmenter never emits those as word tokens — they are merged into
-        // `でした` (or split as `で` + `した`), `なった`, `試したい`, `読んだ` —
-        // so they are deliberately *not* added to `JA_STOPWORDS`. Adding them
-        // would be dead weight. This test documents that decision.
+        // Mid-prose the segmenter merges those into `でした` (or splits them
+        // as `で` + `した`), `なった`, `試したい`, `読んだ`, so they are
+        // deliberately *not* added to `JA_STOPWORDS` (yet). This test
+        // documents that decision.
         //
         // (`なく` was in this list until 0.5.1; it *does* appear standalone —
         // see `naku_as_a_stopword_does_not_swallow_content_words`.)
         for w in ["でし", "なっ", "たい", "んだ"] {
             assert!(!is_stopword(w), "{w} should not be a stopword");
         }
-        // `だろう` (not the fragment `だろ`) is what the segmenter emits.
+        // NOTE: this "never emitted standalone" assumption is *per word*, not
+        // a general rule — `なく` (0.5.1) and `だろ` (see `daro_is_a_stopword`)
+        // both turned out to be emitted standalone at run boundaries
+        // (punctuation/ASCII/emoji/end-of-text) and were promoted to
+        // `JA_STOPWORDS`. `でし` and `なっ` also appear standalone at run
+        // boundaries in colloquial text (`そうでし！`, `なっ、そうか`) but are
+        // deliberately deferred pending frequency evidence; `たい` collides
+        // with hiragana 鯛 (`たいが釣れた` => [たい, が, 釣れた]) and stays out.
         assert!(is_stopword("だろう"));
-        assert!(!is_stopword("だろ"));
     }
 
     #[test]

@@ -1,32 +1,5 @@
 # Changelog
 
-## [Unreleased]
-
-### Fixed
-
-- **The iteration mark `々` (U+3005) no longer splits off its stem.**
-  `tokenize("人々")` returned `["人", "々"]` and `tokenize("佐々木")` returned
-  `["佐", "々", "木"]`. The root cause was not the boundary model: `々` was
-  missing from both `is_non_spacing_script` (tokenize.rs) and the segmenter's
-  kanji class (features.rs), so 人々 fractured at the script-segmentation
-  stage before the AdaBoost model ever saw the junction. `々` is now classed
-  as kanji in both places and the model was retrained (same corpora, same
-  1000 iterations), which makes the 漢字|々 junctions in the existing corpus
-  trainable at all — the 9 seed sentences suffice, and the model generalizes
-  to 々 words absent from the corpus (木々, 山々, 隅々, 佐々木, 代々木).
-  Supplement sentences were tried and rejected: every variant regressed
-  precision or word F1 (see the note in `training/context_supplement.txt`).
-  Corpus metrics improved: boundary F1 0.9041 → 0.9045, boundary precision
-  0.8875 → 0.8914, word F1 0.8065 → 0.8069.
-
-  Known limitation: a kanji word directly following a 々 word can merge with
-  it (時々雨 → one token). 々|漢字 boundaries are too rare in the corpus to
-  learn; unlike the old behaviour, no bare `々` token leaks out. Pinned in
-  `tests/segmenter_quality.rs`.
-
-  `content_hash` values change for texts containing `々` (token stream
-  differs), and `ja_segmenter.bin` was retrained.
-
 ## 0.6.0
 
 ### Added
@@ -57,6 +30,42 @@
   (Hiragana/Katakana/Han/Hangul) count at ~1.5 chars/token, and everything
   else (other scripts, emoji, symbols) counts at the ASCII rate. This is an
   approximation, not an exact model-tokenizer count.
+
+### Fixed
+
+- **The iteration mark `々` (U+3005) no longer splits off its stem.**
+  `tokenize("人々")` returned `["人", "々"]` and `tokenize("佐々木")` returned
+  `["佐", "々", "木"]`. The root cause was not the boundary model: `々` was
+  missing from both `is_non_spacing_script` (tokenize.rs) and the segmenter's
+  kanji class (features.rs), so 人々 fractured at the script-segmentation
+  stage before the AdaBoost model ever saw the junction. `々` is now classed
+  as kanji in both places and the model was retrained (same corpora, same
+  1000 iterations), which makes the 漢字|々 junctions in the existing corpus
+  trainable at all — the 9 seed sentences suffice, and the model generalizes
+  to 々 words absent from the corpus (木々, 山々, 隅々, 佐々木, 代々木).
+  Supplement sentences were tried and rejected: every variant regressed
+  precision or word F1 (see the note in `training/context_supplement.txt`).
+  Corpus metrics improved: boundary F1 0.9041 → 0.9045, boundary precision
+  0.8875 → 0.8914, word F1 0.8065 → 0.8069.
+
+  Known limitation: a kanji word directly following a 々 word can merge with
+  it (時々雨 → one token). 々|漢字 boundaries are too rare in the corpus to
+  learn; unlike the old behaviour, no bare `々` token leaks out. Pinned in
+  `tests/segmenter_quality.rs`.
+
+  `content_hash` values change for texts containing `々` (token stream
+  differs), and `ja_segmenter.bin` was retrained.
+
+- **`だろ` is now a stopword.** The colloquial sentence-final `だろ` (truncated
+  `だろう`) is emitted as a standalone token whenever a Japanese run ends at
+  punctuation, ASCII, emoji, or end-of-text: `これはバグだろ！` =>
+  `[これ, は, バグ, だろ]`, `そうだろ？` => `[そう, だろ]`, `無理だろw` =>
+  `[無理, だろ, w]`. x-metrics measured it leaking into keyword output in 9 of
+  12 natural colloquial tweets. No content word is spelled exactly `だろ`, and
+  the full form `だろう` (already a stopword) is unaffected.
+
+  This fix by itself leaves `content_hash` unchanged — stopwords only apply
+  at the extraction stage (but see the `々` fix above, which does change it).
 
 ## 0.5.1
 
