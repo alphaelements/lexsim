@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`だろ` is now a stopword.** The colloquial sentence-final `だろ` (truncated
+  `だろう`) is emitted as a standalone token whenever a Japanese run ends at
+  punctuation, ASCII, emoji, or end-of-text: `これはバグだろ！` =>
+  `[これ, は, バグ, だろ]`, `そうだろ？` => `[そう, だろ]`, `無理だろw` =>
+  `[無理, だろ, w]`. x-metrics measured it leaking into keyword output in 9 of
+  12 natural colloquial tweets. No content word is spelled exactly `だろ`, and
+  the full form `だろう` (already a stopword) is unaffected.
+
+`content_hash` is unchanged — the segmenter is untouched and stopwords only
+apply at the extraction stage.
+
 ## 0.6.0
 
 ### Added

@@ -182,3 +182,29 @@ fn inflected_verbs_remain_single_tokens() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn sentence_final_daro_is_a_standalone_token() {
+    // Colloquial sentence-final `だろ` (truncated `だろう`) becomes a
+    // standalone token whenever the Japanese run ends there — at punctuation,
+    // ASCII, emoji, or end-of-text (x-metrics: leaks in 9/12 natural
+    // colloquial tweets). This is why `is_stopword("だろ")` must be true.
+    assert_eq!(
+        words("これはバグだろ！"),
+        vec!["これ", "は", "バグ", "だろ"]
+    );
+    assert_eq!(words("そうだろ？"), vec!["そう", "だろ"]);
+    assert_eq!(words("無理だろw"), vec!["無理", "だろ", "w"]);
+    assert!(words("これはバグだろ！")
+        .iter()
+        .any(|t| lexsim::is_stopword(t) && t == "だろ"));
+}
+
+#[test]
+fn mid_run_darou_still_segments_as_darou() {
+    // Regression guard: adding `だろ` to the stopword list must not change
+    // tokenization (stopwords are extraction-stage only), and the full form
+    // `だろう` keeps being emitted — and filtered — where the run continues.
+    assert_eq!(words("そうだろう"), vec!["そう", "だろう"]);
+    assert!(lexsim::is_stopword("だろう"));
+}
