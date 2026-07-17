@@ -101,7 +101,10 @@ pub use score::{
 };
 pub use sentiment::{analyze_sentiment, Polarity, SentimentResult};
 pub use stopwords::is_stopword;
-pub use tokenize::{is_cl_ngram, normalize, tokenize, tokenize_ngrams};
+pub use tokenize::{
+    is_cl_ngram, normalize, tokenize, tokenize_ngrams, tokenize_weighted, WeightedToken,
+    CASE_BOOST, OBJECT_BOOST, TOPIC_BOOST,
+};
 pub use tokens::estimate_tokens;
 
 /// Abstraction over "score these documents against this query". Today the only

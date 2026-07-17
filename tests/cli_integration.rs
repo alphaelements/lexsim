@@ -151,6 +151,46 @@ fn bm25_basic() {
 }
 
 #[test]
+fn bm25_weighted() {
+    // Weighted mode: a stopword-only query scores zero everywhere (plain
+    // mode would let particles and CL-CnG trigrams accumulate noise), and a
+    // content query still ranks the relevant doc first.
+    let input = r#"{
+        "corpus": ["この設定はとても便利です", "メモリ注入の基準はスコア上位5件"],
+        "query": "これはですか",
+        "weighted": true
+    }"#;
+    let (stdout, _, code) = run_cli("bm25", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let scores = v["scores"].as_array().unwrap();
+    assert_eq!(scores[0].as_f64().unwrap(), 0.0);
+    assert_eq!(scores[1].as_f64().unwrap(), 0.0);
+
+    let input = r#"{
+        "corpus": ["この設定はとても便利です", "メモリ注入の基準はスコア上位5件"],
+        "query": "メモリ注入の基準は？",
+        "weighted": true
+    }"#;
+    let (stdout, _, code) = run_cli("bm25", input);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let scores = v["scores"].as_array().unwrap();
+    assert!(scores[1].as_f64().unwrap() > scores[0].as_f64().unwrap());
+}
+
+#[test]
+fn bm25_weighted_wrong_type_is_an_error() {
+    // "weighted": "true" (a string) must not silently fall back to plain
+    // scoring — the caller asked for something and got another.
+    let input = r#"{"corpus": ["hello"], "query": "hello", "weighted": "true"}"#;
+    let (stdout, _, code) = run_cli("bm25", input);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("weighted"));
+}
+
+#[test]
 fn bm25_missing_query() {
     let input = r#"{"corpus": ["hello"]}"#;
     let (stdout, _, code) = run_cli("bm25", input);

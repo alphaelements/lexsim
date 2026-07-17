@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::stopwords::is_stopword;
-use crate::tokenize::{is_cl_ngram, tokenize};
+use crate::tokenize::{is_cl_ngram, tokenize, tokenize_weighted, WeightedToken};
 
 /// A keyword with its TF-IDF score and raw count across the corpus.
 #[derive(Debug, Clone)]
@@ -77,6 +77,28 @@ impl Corpus {
     /// Build a corpus from document texts. Document `i` in the input maps to
     /// index `i` in [`bm25_scores`](Corpus::bm25_scores) output.
     pub fn build(docs: &[String]) -> Self {
+        Self::build_filtered(docs, false)
+    }
+
+    /// Build a corpus with stopwords and CL-CnG trigrams excluded from the
+    /// term statistics (TF, DF, document length). This is the counterpart of
+    /// [`bm25_scores_weighted`](Corpus::bm25_scores_weighted): particles and
+    /// character-trigram noise stop accumulating score across unrelated
+    /// documents, and document length reflects content words only.
+    ///
+    /// The stored token *stream* is filtered too, which changes
+    /// [`cooccurrence_keywords`](Corpus::cooccurrence_keywords) window
+    /// semantics on a weighted corpus: with stopwords removed, content words
+    /// that were separated by particles become window-adjacent, so windows
+    /// reach further in text terms than on a [`build`](Corpus::build) corpus.
+    ///
+    /// [`build`](Corpus::build) is unchanged and keeps the raw token stream
+    /// (the tokenizer's BM25 term-frequency contract).
+    pub fn build_weighted(docs: &[String]) -> Self {
+        Self::build_filtered(docs, true)
+    }
+
+    fn build_filtered(docs: &[String], exclude_noise: bool) -> Self {
         let mut doc_tf = Vec::with_capacity(docs.len());
         let mut doc_len = Vec::with_capacity(docs.len());
         let mut doc_tokens = Vec::with_capacity(docs.len());
@@ -84,7 +106,10 @@ impl Corpus {
         let mut total_len = 0.0;
 
         for doc in docs {
-            let toks = tokenize(doc);
+            let mut toks = tokenize(doc);
+            if exclude_noise {
+                toks.retain(|t| !is_cl_ngram(t) && !is_stopword(t));
+            }
             let mut tf: HashMap<String, u32> = HashMap::new();
             for t in &toks {
                 *tf.entry(t.clone()).or_insert(0) += 1;
@@ -259,6 +284,75 @@ impl Corpus {
         });
         entries.truncate(top_n);
         entries
+    }
+
+    /// Particle-context weighted BM25 score of `query` against every
+    /// document, in document order. The query is tokenized with
+    /// [`tokenize_weighted`]: topic/object/case-marked terms contribute more
+    /// (`score × weight`), stopwords and CL-CnG trigrams contribute nothing.
+    ///
+    /// Build the corpus with [`build_weighted`](Corpus::build_weighted) so
+    /// the document statistics use the same content-word-only filtering.
+    ///
+    /// ```
+    /// use lexsim::Corpus;
+    ///
+    /// let memories = vec![
+    ///     "atomic_write を必ず使う（torn read 防止）".to_string(),
+    ///     "ガントチャートの表示設定".to_string(),
+    /// ];
+    /// let corpus = Corpus::build_weighted(&memories);
+    /// let scores = corpus.bm25_scores_weighted("atomic_write のフックについて");
+    /// assert!(scores[0] > scores[1]);
+    /// ```
+    pub fn bm25_scores_weighted(&self, query: &str) -> Vec<f64> {
+        self.bm25_scores_weighted_tokens(&tokenize_weighted(query))
+    }
+
+    /// Weighted BM25 over pre-weighted query tokens (the counterpart of
+    /// [`bm25_scores_tokens`](Corpus::bm25_scores_tokens) — lets callers
+    /// inject extra terms with hand-assigned weights).
+    ///
+    /// Tokens with a non-finite weight or `weight <= 0.0` are skipped. When
+    /// the same term occurs with several weights, the highest wins (a term
+    /// that is topic-marked anywhere in the query keeps that role;
+    /// occurrences are not summed — same de-duplication contract as
+    /// `bm25_scores_tokens`).
+    pub fn bm25_scores_weighted_tokens(&self, query_tokens: &[WeightedToken]) -> Vec<f64> {
+        let mut scores = vec![0.0; self.n];
+        if self.n == 0 || self.avgdl == 0.0 {
+            return scores;
+        }
+
+        let mut term_weight: HashMap<&str, f64> = HashMap::new();
+        for wt in query_tokens {
+            if !wt.weight.is_finite() || wt.weight <= 0.0 {
+                continue;
+            }
+            let entry = term_weight.entry(wt.token.as_str()).or_insert(0.0);
+            if wt.weight > *entry {
+                *entry = wt.weight;
+            }
+        }
+
+        for (term, weight) in term_weight {
+            let df = match self.df.get(term) {
+                Some(&df) if df > 0 => df as f64,
+                _ => continue,
+            };
+            let idf = (((self.n as f64 - df + 0.5) / (df + 0.5)) + 1.0).ln();
+
+            for (i, tf_map) in self.doc_tf.iter().enumerate() {
+                let tf = match tf_map.get(term) {
+                    Some(&tf) => tf as f64,
+                    None => continue,
+                };
+                let dl = self.doc_len[i];
+                let denom = tf + BM25_K1 * (1.0 - BM25_B + BM25_B * dl / self.avgdl);
+                scores[i] += weight * idf * (tf * (BM25_K1 + 1.0)) / denom;
+            }
+        }
+        scores
     }
 
     /// BM25 over pre-tokenized query terms (lets callers inject extra terms,
@@ -884,6 +978,113 @@ mod tests {
     #[test]
     fn textrank_keywords_empty_text() {
         assert!(textrank_keywords("", 4, 10).is_empty());
+    }
+
+    #[test]
+    fn weighted_corpus_excludes_stopwords_and_ngrams() {
+        let docs = vec!["この機能は便利です".to_string()];
+        let plain = Corpus::build(&docs);
+        let weighted = Corpus::build_weighted(&docs);
+        // Stopwords score in the plain corpus but are absent from the
+        // weighted one.
+        assert!(plain.bm25_scores_tokens(&["は".to_string()])[0] > 0.0);
+        assert_eq!(weighted.bm25_scores_tokens(&["は".to_string()])[0], 0.0);
+        // Content words still score.
+        assert!(weighted.bm25_scores_tokens(&["機能".to_string()])[0] > 0.0);
+        // CL-CnG trigrams are gone too.
+        assert_eq!(
+            weighted.bm25_scores_tokens(&["\u{1}この機".to_string()])[0],
+            0.0
+        );
+    }
+
+    #[test]
+    fn weighted_scores_boost_topic_terms() {
+        // Same tf/df/doc-length for alpha and delta; the only difference is
+        // the query role: alpha is topic-marked (は), delta is bare. The
+        // topic-marked doc must win by exactly the boost factor.
+        let docs = vec!["alpha content".to_string(), "delta content".to_string()];
+        let corpus = Corpus::build_weighted(&docs);
+        let scores = corpus.bm25_scores_weighted("alphaは delta");
+        assert!(scores[0] > scores[1], "topic-boosted term must outrank");
+        let ratio = scores[0] / scores[1];
+        assert!(
+            (ratio - crate::tokenize::TOPIC_BOOST).abs() < 1e-9,
+            "expected boost ratio {}, got {ratio}",
+            crate::tokenize::TOPIC_BOOST
+        );
+    }
+
+    #[test]
+    fn weighted_scores_stopword_only_query_is_zero() {
+        let docs = vec!["この機能は便利です".to_string()];
+        let corpus = Corpus::build_weighted(&docs);
+        let scores = corpus.bm25_scores_weighted("これは");
+        assert_eq!(scores[0], 0.0);
+    }
+
+    #[test]
+    fn weighted_scores_tokens_max_weight_wins_on_duplicates() {
+        // The same term occurring both boosted and unboosted in one query:
+        // the boosted role must win (not double-count, not average).
+        let docs = vec!["alpha content".to_string(), "delta content".to_string()];
+        let corpus = Corpus::build_weighted(&docs);
+        let query = vec![
+            WeightedToken {
+                token: "alpha".to_string(),
+                weight: 1.0,
+            },
+            WeightedToken {
+                token: "alpha".to_string(),
+                weight: 2.0,
+            },
+            WeightedToken {
+                token: "delta".to_string(),
+                weight: 1.0,
+            },
+        ];
+        let scores = corpus.bm25_scores_weighted_tokens(&query);
+        let ratio = scores[0] / scores[1];
+        assert!((ratio - 2.0).abs() < 1e-9, "expected 2.0, got {ratio}");
+    }
+
+    #[test]
+    fn weighted_scores_tokens_non_finite_weights_are_skipped() {
+        // Caller-supplied weights are untrusted: NaN and infinity must not
+        // poison the scores (adversarial-review NIT).
+        let docs = vec!["alpha content".to_string()];
+        let corpus = Corpus::build_weighted(&docs);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let query = vec![WeightedToken {
+                token: "alpha".to_string(),
+                weight: bad,
+            }];
+            let scores = corpus.bm25_scores_weighted_tokens(&query);
+            assert_eq!(scores[0], 0.0, "weight {bad} must be skipped");
+        }
+    }
+
+    #[test]
+    fn weighted_scores_empty_corpus() {
+        let corpus = Corpus::build_weighted(&[]);
+        assert!(corpus.is_empty());
+        assert!(corpus.bm25_scores_weighted("anything").is_empty());
+    }
+
+    #[test]
+    fn weighted_ranks_identifier_memory_first() {
+        // The spec's motivating scenario: an identifier-bearing memory must
+        // outrank generic memories for an identifier query, without CL-CnG
+        // or particle noise diluting the ranking.
+        let docs = vec![
+            "atomic_write を必ず使う（torn read 防止）".to_string(),
+            "ガントチャートの表示設定を変更する".to_string(),
+            "メモリ注入の基準はスコア上位5件です".to_string(),
+        ];
+        let corpus = Corpus::build_weighted(&docs);
+        let scores = corpus.bm25_scores_weighted("atomic_write のフックについて教えて");
+        assert!(scores[0] > scores[1], "{scores:?}");
+        assert!(scores[0] > scores[2], "{scores:?}");
     }
 
     #[test]

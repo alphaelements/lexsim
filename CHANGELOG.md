@@ -4,6 +4,25 @@
 
 ### Added
 
+- **Particle-context weighted BM25** — uses Japanese case particles as a
+  dictionary-free stand-in for part-of-speech tagging, so topic terms score
+  higher and function-word/trigram noise scores zero. Motivated by
+  handoff-mcp's `memory_query` relevance precision.
+  - `tokenize_weighted(text) -> Vec<WeightedToken>`: same token multiset as
+    `tokenize()`, each token weighted by the particle following it —
+    `Xは`/`Xが` → `TOPIC_BOOST` (2.0), `Xを` → `OBJECT_BOOST` (1.8),
+    `Xで`/`Xに`/`Xから`/`Xへ`/`Xまで`/`Xより` → `CASE_BOOST` (1.5); stopwords
+    and CL-CnG trigrams → 0.0. An identifier's sub-tokens share its boost
+    (`atomic_write は` boosts `atomic_write`, `atomic`, `write`).
+  - `Corpus::build_weighted(docs)`: corpus with stopwords and CL-CnG trigrams
+    excluded from TF/DF/document-length statistics.
+  - `Corpus::bm25_scores_weighted(query)` / `bm25_scores_weighted_tokens
+    (&[WeightedToken])`: BM25 where each term's contribution is multiplied by
+    its weight; zero-weight tokens are skipped, duplicate terms keep their
+    highest weight.
+  - CLI: `lexsim bm25` accepts `"weighted": true`.
+  - Existing APIs (`tokenize`, `Corpus::build`, `bm25_scores`, ...) are
+    unchanged; `content_hash` is unaffected.
 - **`estimate_tokens(text: &str) -> usize`** — a cheap, dependency-free
   estimate of how many model tokens a string would consume, for callers that
   need to stay within a token budget without invoking a real tokenizer.
