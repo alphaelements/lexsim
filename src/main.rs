@@ -124,8 +124,20 @@ fn cmd_bm25(input: &Value) -> Result<Value, String> {
         .map(|v| v.as_str().unwrap_or("").to_string())
         .collect();
 
-    let corpus = Corpus::build(&docs);
-    let scores: Vec<f64> = corpus.bm25_scores(query).into_iter().map(round6).collect();
+    let weighted = match input.get("weighted") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("\"weighted\" must be a boolean".to_string()),
+    };
+
+    let scores: Vec<f64> = if weighted {
+        Corpus::build_weighted(&docs).bm25_scores_weighted(query)
+    } else {
+        Corpus::build(&docs).bm25_scores(query)
+    }
+    .into_iter()
+    .map(round6)
+    .collect();
 
     Ok(serde_json::json!({"scores": scores}))
 }
@@ -274,7 +286,9 @@ fn print_usage() {
     eprintln!("Subcommands:");
     eprintln!("  tokenize   Tokenize texts (stdin JSON → stdout JSON)");
     eprintln!("  jaccard    Compute Jaccard similarity (stdin JSON → stdout JSON)");
-    eprintln!("  bm25       Compute BM25 scores (stdin JSON → stdout JSON)");
+    eprintln!(
+        "  bm25       Compute BM25 scores (stdin JSON → stdout JSON); \"weighted\": true for particle-context weighted scoring"
+    );
     eprintln!("  hash       Compute content hashes (stdin JSON → stdout JSON)");
     eprintln!(
         "  keywords   Extract top-N keywords (stdin JSON → stdout JSON); \"method\": \"tfidf\" (default) | \"textrank\" | \"cooccurrence\" (requires \"query\")"

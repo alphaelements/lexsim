@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.6.0
+
+### ⚠ Breaking
+
+- **`content_hash` values change.** The boundary segmenter was retrained for
+  the `々` fix (see *Fixed* below), and the retrain shifts word boundaries
+  well beyond texts containing `々`: roughly 10% of the Japanese sentences in
+  the training corpus tokenize differently (measured: 129 of 1344 `々`-free
+  sentences), so every `content_hash` derived from an affected text changes.
+  Downstream deduplication caches keyed on `content_hash` are invalidated and
+  will re-hash on first use. ASCII-only text is unaffected. No API signature
+  changed.
+
+### Added
+
+- **Particle-context weighted BM25** — uses Japanese case particles as a
+  dictionary-free stand-in for part-of-speech tagging, so topic terms score
+  higher and function-word/trigram noise scores zero. Motivated by
+  handoff-mcp's `memory_query` relevance precision.
+  - `tokenize_weighted(text) -> Vec<WeightedToken>`: same token multiset as
+    `tokenize()`, each token weighted by the particle following it —
+    `Xは`/`Xが` → `TOPIC_BOOST` (2.0), `Xを` → `OBJECT_BOOST` (1.8),
+    `Xで`/`Xに`/`Xから`/`Xへ`/`Xまで`/`Xより` → `CASE_BOOST` (1.5); stopwords
+    and CL-CnG trigrams → 0.0. An identifier's sub-tokens share its boost
+    (`atomic_write は` boosts `atomic_write`, `atomic`, `write`).
+  - `Corpus::build_weighted(docs)`: corpus with stopwords and CL-CnG trigrams
+    excluded from TF/DF/document-length statistics.
+  - `Corpus::bm25_scores_weighted(query)` / `bm25_scores_weighted_tokens
+    (&[WeightedToken])`: BM25 where each term's contribution is multiplied by
+    its weight; zero-weight tokens are skipped, duplicate terms keep their
+    highest weight.
+  - CLI: `lexsim bm25` accepts `"weighted": true`.
+  - Existing APIs (`tokenize`, `Corpus::build`, `bm25_scores`, ...) are
+    unchanged; `content_hash` is unaffected.
+- **`estimate_tokens(text: &str) -> usize`** — a cheap, dependency-free
+  estimate of how many model tokens a string would consume, for callers that
+  need to stay within a token budget without invoking a real tokenizer.
+  Heuristic: ASCII characters count at ~4 chars/token, CJK characters
+  (Hiragana/Katakana/Han/Hangul) count at ~1.5 chars/token, and everything
+  else (other scripts, emoji, symbols) counts at the ASCII rate. This is an
+  approximation, not an exact model-tokenizer count.
+
+### Fixed
+
+- **The iteration mark `々` (U+3005) no longer splits off its stem.**
+  `tokenize("人々")` returned `["人", "々"]` and `tokenize("佐々木")` returned
+  `["佐", "々", "木"]`. The root cause was not the boundary model: `々` was
+  missing from both `is_non_spacing_script` (tokenize.rs) and the segmenter's
+  kanji class (features.rs), so 人々 fractured at the script-segmentation
+  stage before the AdaBoost model ever saw the junction. `々` is now classed
+  as kanji in both places and the model was retrained (same corpora, same
+  1000 iterations), which makes the 漢字|々 junctions in the existing corpus
+  trainable at all — the 9 seed sentences suffice, and the model generalizes
+  to 々 words absent from the corpus (木々, 山々, 隅々, 佐々木, 代々木).
+  Supplement sentences were tried and rejected: every variant regressed
+  precision or word F1 (see the note in `training/context_supplement.txt`).
+  Corpus metrics improved: boundary F1 0.9041 → 0.9045, boundary precision
+  0.8875 → 0.8914, word F1 0.8065 → 0.8069.
+
+  Known limitation: a kanji word directly following a 々 word can merge with
+  it (時々雨 → one token). 々|漢字 boundaries are too rare in the corpus to
+  learn; unlike the old behaviour, `々` no longer splits off a kanji stem
+  (degenerate inputs like a standalone `々` or `A々B` still emit a bare `々`
+  token, as before). Pinned in `tests/segmenter_quality.rs`.
+
+  The retrained `ja_segmenter.bin` also shifts boundaries on unrelated
+  Japanese text — see *⚠ Breaking* above for the `content_hash` impact.
+
+- **`だろ` is now a stopword.** The colloquial sentence-final `だろ` (truncated
+  `だろう`) is emitted as a standalone token whenever a Japanese run ends at
+  punctuation, ASCII, emoji, or end-of-text: `これはバグだろ！` =>
+  `[これ, は, バグ, だろ]`, `そうだろ？` => `[そう, だろ]`, `無理だろw` =>
+  `[無理, だろ, w]`. x-metrics measured it leaking into keyword output in 9 of
+  12 natural colloquial tweets. No content word is spelled exactly `だろ`, and
+  the full form `だろう` (already a stopword) is unaffected.
+
+  This fix by itself leaves `content_hash` unchanged — stopwords only apply
+  at the extraction stage (but see *⚠ Breaking* above: the segmenter retrain
+  in this release does change hashes).
+
 ## 0.5.1
 
 ### Fixed

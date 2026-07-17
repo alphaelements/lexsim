@@ -50,7 +50,7 @@ documents). Its only runtime dependencies are `unicode-segmentation` and
 
 ```toml
 [dependencies]
-lexsim = "0.4"
+lexsim = "0.6"
 ```
 
 ## Usage
@@ -96,6 +96,32 @@ let corpus = Corpus::build(&memories);
 assert!(corpus.bm25_scores("メモリ atomic_write")[0] > 0.0);
 ```
 
+For higher-precision retrieval, the **particle-context weighted** variant uses
+Japanese case particles as a dictionary-free stand-in for part-of-speech
+tagging: `Xは`/`Xが` marks X as the topic (boost ×2.0), `Xを` as the object
+(×1.8), `Xで`/`Xに`/… as case-marked complements (×1.5), while stopwords and
+CL-CnG trigrams stop contributing score entirely:
+
+```rust
+use lexsim::{tokenize_weighted, Corpus, TOPIC_BOOST};
+
+let memories = vec![
+    "メモリ注入の基準はスコア上位5件".to_string(),
+    "この設定はとても便利です".to_string(),
+];
+let corpus = Corpus::build_weighted(&memories); // stopwords/CL-CnG excluded
+let scores = corpus.bm25_scores_weighted("メモリ注入の基準は？");
+assert!(scores[0] > scores[1]);
+
+// A particle-only query no longer matches anything.
+assert_eq!(corpus.bm25_scores_weighted("これはですか")[0], 0.0);
+
+// The weighted tokens themselves are public (e.g. to inject extra terms
+// via Corpus::bm25_scores_weighted_tokens).
+let tokens = tokenize_weighted("メモリは重要");
+assert!(tokens.iter().any(|t| t.token == "メモリ" && t.weight == TOPIC_BOOST));
+```
+
 ## CLI
 
 `lexsim` also ships a CLI binary for use from other languages (e.g. via
@@ -122,6 +148,9 @@ echo '{"a": "hello world", "b": "hello there"}' | lexsim jaccard
 echo '{"corpus": ["atomic write", "cat mat"], "query": "atomic"}' | lexsim bm25
 # → {"scores":[0.693147,0.0]}
 
+echo '{"corpus": ["メモリ注入の基準はスコア上位5件", "この設定はとても便利です"], "query": "メモリ注入の基準は？", "weighted": true}' | lexsim bm25
+# → particle-context weighted scoring (stopwords/CL-CnG excluded)
+
 echo '{"texts": ["hello world", "Hello World"]}' | lexsim hash
 # → {"hashes":["<same>","<same>"]}
 
@@ -142,11 +171,14 @@ echo '{"texts": ["This is great!", "Terrible bug"]}' | lexsim sentiment
 | `tokenize` / `tokenize_ngrams` / `normalize` | dictionary-free, multilingual tokenizer (NFKC + UAX#29 + hybrid word segmentation + CL-CnG) |
 | `jaccard` / `jaccard_sets` / `token_set` | symmetric set similarity for dedup |
 | `Corpus::build` / `Corpus::bm25_scores` | asymmetric BM25 ranking for retrieval |
+| `Corpus::build_weighted` / `Corpus::bm25_scores_weighted` | particle-context weighted BM25 (topic/object boost, stopword & CL-CnG exclusion) |
+| `tokenize_weighted` / `WeightedToken` | tokens with particle-context weights (`TOPIC_BOOST` / `OBJECT_BOOST` / `CASE_BOOST`) |
 | `Corpus::tfidf_keywords` | TF-IDF top-N keyword extraction |
 | `textrank_keywords` | graph-based TextRank keyword extraction (single-text) |
 | `corpus_diff` | compare two corpora for distinctive keywords |
 | `analyze_sentiment` | dictionary-based sentiment polarity classification (ja/en) |
 | `content_hash` / `fnv1a_hex` | stable content hashing for change detection |
+| `estimate_tokens` | cheap heuristic estimate of model-token count, for token-budget keeping |
 | `is_stopword` | Japanese stopword filter (particles, auxiliaries, demonstratives) |
 | `segmenter` | AdaBoost-based Japanese word segmenter (public module for advanced use) |
 | `Scorer` / `LexicalScorer` | trait + lexical impl; lets an embedding-based scorer slot in later behind one call site |

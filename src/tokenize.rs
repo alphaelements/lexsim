@@ -70,6 +70,159 @@ pub fn is_cl_ngram(token: &str) -> bool {
     token.starts_with(NGRAM_PREFIX)
 }
 
+/// Boost for a topic/subject-marked content word (`Xは` / `Xが`). The particle
+/// marks X as what the sentence is *about* — the strongest relevance signal a
+/// query term can carry.
+pub const TOPIC_BOOST: f64 = 2.0;
+/// Boost for a direct object (`Xを`).
+pub const OBJECT_BOOST: f64 = 1.8;
+/// Boost for case-marked complements (`Xで` / `Xに` / `Xから` / `Xへ` /
+/// `Xまで` / `Xより`): means, target, origin — relevant but less central than
+/// topic/object.
+pub const CASE_BOOST: f64 = 1.5;
+
+/// A token with a particle-context weight for weighted BM25 scoring
+/// ([`crate::Corpus::bm25_scores_weighted`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WeightedToken {
+    pub token: String,
+    /// `1.0` = default content word, `>1.0` = boosted (topic/object/case-
+    /// marked), `0.0` = stopword or CL-CnG trigram (excluded from scoring).
+    pub weight: f64,
+}
+
+/// True for characters that end a sentence or line: a boost particle after
+/// one of these must not boost a word from before it. ASCII `.` is *not*
+/// listed — `classify` routes it into Spacing segments as an identifier
+/// connector (`0.13.0`), so it never reaches an Other segment.
+fn is_boost_barrier(c: char) -> bool {
+    matches!(c, '。' | '！' | '？' | '!' | '?' | '\n' | '\r')
+}
+
+/// Boost factor carried by a Japanese case particle onto the content word
+/// immediately before it; `None` for anything that is not a boost particle.
+fn particle_boost(token: &str) -> Option<f64> {
+    match token {
+        "は" | "が" => Some(TOPIC_BOOST),
+        "を" => Some(OBJECT_BOOST),
+        "で" | "に" | "から" | "へ" | "まで" | "より" => Some(CASE_BOOST),
+        _ => None,
+    }
+}
+
+/// Like [`tokenize`], but each token carries a weight inferred from the
+/// Japanese particle following it — a dictionary-free stand-in for
+/// part-of-speech tagging (`Xは` marks X as topic, `Xを` as object, ...).
+///
+/// Emits the same token multiset as [`tokenize`]:
+/// - stopwords and CL-CnG trigrams are kept, with `weight = 0.0`;
+/// - a content word followed by a boost particle gets that particle's boost
+///   ([`TOPIC_BOOST`] / [`OBJECT_BOOST`] / [`CASE_BOOST`]); for an identifier
+///   this applies to the whole identifier *and* its sub-tokens
+///   (`atomic_write は` boosts `atomic_write`, `atomic`, `write`);
+/// - every other content word has `weight = 1.0`.
+///
+/// "Followed by" is judged over the content-token stream: whitespace,
+/// brackets and quotes between the word and the particle are transparent
+/// (`「メモリ」は` still boosts `メモリ`), but sentence-final punctuation
+/// (`。` `！` `？` `!` `?`) and newlines block the boost — a particle never
+/// boosts a word from the previous sentence or line.
+///
+/// ```
+/// use lexsim::{tokenize_weighted, TOPIC_BOOST};
+///
+/// let weighted = tokenize_weighted("メモリは重要");
+/// let memory = weighted.iter().find(|wt| wt.token == "メモリ").unwrap();
+/// assert_eq!(memory.weight, TOPIC_BOOST);
+/// ```
+pub fn tokenize_weighted(text: &str) -> Vec<WeightedToken> {
+    let cased: String = text.nfkc().collect();
+
+    // Emission groups: all tokens that originate from one source word (an
+    // identifier plus its sub-tokens, or one segmented Japanese word). A
+    // boost particle boosts the whole *group* before it, so `atomic_write は`
+    // boosts the identifier and its sub-tokens alike. `barrier_before[i]`
+    // records a sentence/line boundary between group i-1 and group i, which
+    // blocks the boost from crossing it.
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    let mut barrier_before: Vec<bool> = Vec::new();
+    let mut pending_barrier = false;
+    for segment in script_segments(&cased) {
+        match segment.class {
+            ScriptClass::Spacing => {
+                // A Spacing segment can never contain whitespace (classify()
+                // sends whitespace to Other), so this loop yields exactly one
+                // chunk; split_whitespace is belt-and-braces against that
+                // invariant changing. Tokens per chunk are the same multiset
+                // push_word_tokens emits (word + identifier sub-tokens).
+                for raw in segment.text.split_whitespace() {
+                    let mut group = Vec::new();
+                    for word in raw.unicode_words() {
+                        group.push(lowercase(word));
+                        push_identifier_subtokens(word, &mut group);
+                    }
+                    push_identifier_subtokens(raw, &mut group);
+                    if !group.is_empty() {
+                        groups.push(group);
+                        barrier_before.push(std::mem::take(&mut pending_barrier));
+                    }
+                }
+            }
+            ScriptClass::NonSpacing => {
+                let mut toks = Vec::new();
+                crate::segmenter::push_segmented_ja(segment.text, &mut toks);
+                for t in toks {
+                    groups.push(vec![t]);
+                    barrier_before.push(std::mem::take(&mut pending_barrier));
+                }
+            }
+            ScriptClass::Other => {
+                // Dropped from tokenization, but sentence-final punctuation
+                // and newlines must still block a boost from crossing them.
+                if segment.text.chars().any(is_boost_barrier) {
+                    pending_barrier = true;
+                }
+            }
+        }
+    }
+
+    // A group followed by a lone boost-particle group gets that particle's
+    // boost. Boost particles only ever come out of the Japanese segmenter as
+    // single-token groups; adjacency is over the content-token stream, with
+    // sentence/line boundaries recorded as barriers.
+    let mut out = Vec::new();
+    for (i, group) in groups.iter().enumerate() {
+        let boost = groups
+            .get(i + 1)
+            .filter(|next| next.len() == 1 && !barrier_before[i + 1])
+            .and_then(|next| particle_boost(&next[0]))
+            .unwrap_or(1.0);
+        for token in group {
+            let weight = if crate::stopwords::is_stopword(token) {
+                0.0
+            } else {
+                boost
+            };
+            out.push(WeightedToken {
+                token: token.clone(),
+                weight,
+            });
+        }
+    }
+
+    // CL-CnG trigrams: same emission as `tokenize`, weight 0.0 (matching is
+    // done by the filtered corpus, so they carry no score).
+    let lowered = lowercase(&cased);
+    let mut ngrams = Vec::new();
+    push_char_ngrams(&lowered, &mut ngrams);
+    out.extend(
+        ngrams
+            .into_iter()
+            .map(|token| WeightedToken { token, weight: 0.0 }),
+    );
+    out
+}
+
 /// Like [`tokenize`] but generates word-level n-grams of the given size.
 ///
 /// `n = 1` is equivalent to [`tokenize`]. For `n = 2`, adjacent word tokens
@@ -145,9 +298,10 @@ fn classify(c: char) -> ScriptClass {
 
 /// True for scripts written without spaces between words, where dictionary-free
 /// recall is best served by character n-grams. Ranges per the Unicode blocks.
-fn is_non_spacing_script(c: char) -> bool {
+pub(crate) fn is_non_spacing_script(c: char) -> bool {
     matches!(c as u32,
-        0x3040..=0x309F   // Hiragana
+        0x3005            // 々 ideographic iteration mark (repeats the preceding kanji)
+        | 0x3040..=0x309F // Hiragana
         | 0x30A0..=0x30FF // Katakana
         | 0x31F0..=0x31FF // Katakana Phonetic Extensions
         | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
@@ -436,5 +590,155 @@ mod tests {
         assert!(toks.contains(&"hello".to_string()));
         // no bigrams possible from a single word token
         assert!(!toks.iter().any(|t| t.contains(' ')));
+    }
+
+    /// Weight of `token` in the weighted tokenization of `text`. Panics when
+    /// the token is absent; when a token appears more than once the weights
+    /// must all agree (a token's role is per-occurrence, but these fixtures
+    /// only use unambiguous sentences).
+    fn weight_of(text: &str, token: &str) -> f64 {
+        let weighted = tokenize_weighted(text);
+        let hits: Vec<f64> = weighted
+            .iter()
+            .filter(|wt| wt.token == token)
+            .map(|wt| wt.weight)
+            .collect();
+        assert!(!hits.is_empty(), "token {token:?} not found in {text:?}");
+        for w in &hits {
+            assert_eq!(*w, hits[0], "inconsistent weights for {token:?}: {hits:?}");
+        }
+        hits[0]
+    }
+
+    #[test]
+    fn weighted_topic_particle_boosts_preceding_word() {
+        // `atomic_write は` — the topic particle marks atomic_write as the
+        // subject; the full identifier AND its sub-tokens get the boost so a
+        // sub-token query match benefits too.
+        assert_eq!(
+            weight_of("atomic_write は重要", "atomic_write"),
+            TOPIC_BOOST
+        );
+        assert_eq!(weight_of("atomic_write は重要", "atomic"), TOPIC_BOOST);
+        assert_eq!(weight_of("atomic_write は重要", "write"), TOPIC_BOOST);
+        // The word after the particle is a plain content word.
+        assert_eq!(weight_of("atomic_write は重要", "重要"), 1.0);
+    }
+
+    #[test]
+    fn weighted_ga_is_topic_boost() {
+        assert_eq!(weight_of("メモリが不足する", "メモリ"), TOPIC_BOOST);
+    }
+
+    #[test]
+    fn weighted_object_particle_boost() {
+        assert_eq!(weight_of("ファイルを書く", "ファイル"), OBJECT_BOOST);
+        assert_eq!(weight_of("ファイルを書く", "書く"), 1.0);
+    }
+
+    #[test]
+    fn weighted_case_particle_boost() {
+        // で / に mark means/target — mid-tier boost.
+        assert_eq!(weight_of("sshで接続する", "ssh"), CASE_BOOST);
+        assert_eq!(weight_of("サーバーに送る", "サーバー"), CASE_BOOST);
+    }
+
+    #[test]
+    fn weighted_plain_content_word_is_default() {
+        // No trailing particle → default weight.
+        assert_eq!(weight_of("使う", "使う"), 1.0);
+    }
+
+    #[test]
+    fn weighted_stopwords_are_zero() {
+        let weighted = tokenize_weighted("メモリ機能はセッション間で教訓を引き継ぐ");
+        for wt in &weighted {
+            if crate::stopwords::is_stopword(&wt.token) {
+                assert_eq!(wt.weight, 0.0, "stopword {:?} must be 0.0", wt.token);
+            }
+        }
+        // and the particles really are present as zero-weight tokens
+        assert_eq!(
+            weight_of("メモリ機能はセッション間で教訓を引き継ぐ", "は"),
+            0.0
+        );
+        assert_eq!(
+            weight_of("メモリ機能はセッション間で教訓を引き継ぐ", "を"),
+            0.0
+        );
+    }
+
+    #[test]
+    fn weighted_cl_ngrams_are_zero() {
+        let weighted = tokenize_weighted("hello メモリ");
+        let ngrams: Vec<_> = weighted
+            .iter()
+            .filter(|wt| is_cl_ngram(&wt.token))
+            .collect();
+        assert!(!ngrams.is_empty(), "CL-CnG trigrams must still be emitted");
+        for wt in ngrams {
+            assert_eq!(wt.weight, 0.0, "CL-CnG {:?} must be 0.0", wt.token);
+        }
+    }
+
+    #[test]
+    fn weighted_boost_does_not_cross_stopword_group() {
+        // `Xの設定は` — は boosts 設定 (the group immediately before it), and
+        // must NOT skip back over it to boost anything earlier.
+        assert_eq!(weight_of("メモリの設定は重要", "設定"), TOPIC_BOOST);
+        assert_eq!(weight_of("メモリの設定は重要", "メモリ"), 1.0);
+    }
+
+    #[test]
+    fn weighted_boost_blocked_by_sentence_boundary() {
+        // Adversarial-review finding: Other segments are dropped before
+        // adjacency is computed, so without a barrier the topic particle of
+        // the NEXT sentence boosted the last word of the previous one.
+        assert_eq!(weight_of("atomic_write。は重要", "atomic_write"), 1.0);
+        assert_eq!(weight_of("重要。から始める", "重要"), 1.0);
+        // Newlines separate list items / lines the same way.
+        assert_eq!(weight_of("atomic_write\nは重要", "atomic_write"), 1.0);
+    }
+
+    #[test]
+    fn weighted_boost_passes_through_quotes_and_brackets() {
+        // Quotes/brackets around the word must stay transparent: the particle
+        // still marks the quoted word as topic.
+        assert_eq!(weight_of("「メモリ」は重要", "メモリ"), TOPIC_BOOST);
+        assert_eq!(weight_of("(ファイル)を書く", "ファイル"), OBJECT_BOOST);
+        // Plain whitespace (an Other segment) stays transparent too.
+        assert_eq!(
+            weight_of("atomic_write は重要", "atomic_write"),
+            TOPIC_BOOST
+        );
+    }
+
+    #[test]
+    fn weighted_token_multiset_matches_tokenize() {
+        // tokenize_weighted must not invent or drop tokens: same multiset as
+        // tokenize() (order across a spacing chunk may differ).
+        for text in [
+            "atomic_write は重要",
+            "メモリ機能はセッション間で教訓を引き継ぐ",
+            "use atomic_write always",
+            "getMemoryQuery を呼ぶ",
+            "atomic_write。は重要",
+            "「メモリ」は重要！\n次の行",
+        ] {
+            let mut plain = tokenize(text);
+            let mut weighted: Vec<String> = tokenize_weighted(text)
+                .into_iter()
+                .map(|wt| wt.token)
+                .collect();
+            plain.sort();
+            weighted.sort();
+            assert_eq!(plain, weighted, "token multiset diverged for {text:?}");
+        }
+    }
+
+    #[test]
+    fn weighted_empty_input() {
+        assert!(tokenize_weighted("").is_empty());
+        assert!(tokenize_weighted("   ").is_empty());
     }
 }
