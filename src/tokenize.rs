@@ -30,6 +30,12 @@ const NGRAM_PREFIX: char = '\u{1}';
 /// Length of the cross-language character n-gram.
 const CL_NGRAM: usize = 3;
 
+/// Weight factor applied to content-word-derived CL-CnG trigrams in
+/// [`tokenize_weighted`]. A trigram whose character window overlaps at least
+/// one content word gets `TRIGRAM_FACTOR × max(overlapping token weights)`;
+/// trigrams covering only stopwords/particles stay at `0.0`.
+pub const TRIGRAM_FACTOR: f64 = 0.25;
+
 /// Tokenize `text` into a flat list of tokens (words / segmented Japanese
 /// words / CL-CnG trigrams). Order is deterministic; duplicates are kept
 /// (BM25 needs term frequencies). For set-based metrics (Jaccard) deduplicate
@@ -87,7 +93,9 @@ pub const CASE_BOOST: f64 = 1.5;
 pub struct WeightedToken {
     pub token: String,
     /// `1.0` = default content word, `>1.0` = boosted (topic/object/case-
-    /// marked), `0.0` = stopword or CL-CnG trigram (excluded from scoring).
+    /// marked), `TRIGRAM_FACTOR × weight` = content-word-derived CL-CnG
+    /// trigram, `0.0` = stopword or stopword-only CL-CnG (excluded from
+    /// scoring).
     pub weight: f64,
 }
 
@@ -115,12 +123,15 @@ fn particle_boost(token: &str) -> Option<f64> {
 /// part-of-speech tagging (`Xは` marks X as topic, `Xを` as object, ...).
 ///
 /// Emits the same token multiset as [`tokenize`]:
-/// - stopwords and CL-CnG trigrams are kept, with `weight = 0.0`;
+/// - stopwords get `weight = 0.0`;
 /// - a content word followed by a boost particle gets that particle's boost
 ///   ([`TOPIC_BOOST`] / [`OBJECT_BOOST`] / [`CASE_BOOST`]); for an identifier
 ///   this applies to the whole identifier *and* its sub-tokens
 ///   (`atomic_write は` boosts `atomic_write`, `atomic`, `write`);
-/// - every other content word has `weight = 1.0`.
+/// - every other content word has `weight = 1.0`;
+/// - CL-CnG trigrams get `TRIGRAM_FACTOR × max(overlapping word weights)`,
+///   so content-word-derived trigrams participate in scoring while
+///   stopword-only trigrams stay at `0.0`.
 ///
 /// "Followed by" is judged over the content-token stream: whitespace,
 /// brackets and quotes between the word and the particle are transparent
@@ -210,16 +221,61 @@ pub fn tokenize_weighted(text: &str) -> Vec<WeightedToken> {
         }
     }
 
-    // CL-CnG trigrams: same emission as `tokenize`, weight 0.0 (matching is
-    // done by the filtered corpus, so they carry no score).
+    // Build a per-character weight map over the lowered text so that CL-CnG
+    // trigrams inherit the weight of the content word(s) they overlap.
+    // Lowercasing can change the char count (e.g. Turkish İ → 2 chars), so
+    // we map each cased segment to its lowered char range.
     let lowered = lowercase(&cased);
-    let mut ngrams = Vec::new();
-    push_char_ngrams(&lowered, &mut ngrams);
-    out.extend(
-        ngrams
-            .into_iter()
-            .map(|token| WeightedToken { token, weight: 0.0 }),
-    );
+    let lowered_char_count = lowered.chars().count();
+    let mut char_weights = vec![0.0f64; lowered_char_count];
+
+    // Walk the lowered text per cased char, painting each position with the
+    // weight of the word token that covers it. We iterate the same segments
+    // as above, but this time only to locate each segment in the lowered
+    // text and paint its token weights.
+    let mut lowered_char_idx = 0usize;
+    let mut token_idx = 0usize;
+    for segment in script_segments(&cased) {
+        let seg_lowered = lowercase(segment.text);
+        let seg_lowered_len = seg_lowered.chars().count();
+        match segment.class {
+            ScriptClass::Spacing | ScriptClass::NonSpacing => {
+                // Count how many word tokens this segment produced in `out`.
+                // Walk forward from `token_idx` while the token can be found
+                // in this segment's lowered text.
+                let seg_start = token_idx;
+                let seg_chars: Vec<char> = seg_lowered.chars().collect();
+                let mut scan_pos = 0usize;
+                while token_idx < out.len() {
+                    let tok_chars: Vec<char> = out[token_idx].token.chars().collect();
+                    if tok_chars.is_empty() {
+                        token_idx += 1;
+                        continue;
+                    }
+                    if let Some(found) = find_subsequence(&seg_chars[scan_pos..], &tok_chars) {
+                        if found == 0 {
+                            scan_pos += tok_chars.len();
+                        }
+                        token_idx += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                let seg_tokens: Vec<&WeightedToken> = out[seg_start..token_idx].iter().collect();
+                assign_char_weights_from_segment(
+                    segment.text,
+                    &seg_tokens,
+                    lowered_char_idx,
+                    &mut char_weights,
+                );
+            }
+            ScriptClass::Other => {}
+        }
+        lowered_char_idx += seg_lowered_len;
+    }
+
+    push_char_ngrams_weighted(&lowered, &char_weights, &mut out);
     out
 }
 
@@ -400,6 +456,118 @@ fn split_camel(s: &str) -> Vec<String> {
         pieces.push(buf);
     }
     pieces
+}
+
+/// Assign per-character weights for a segment by matching the lowercased
+/// segment text against this segment's word tokens. `char_weights` is indexed
+/// over the **lowered** full text; `lowered_start` is where this segment
+/// begins in that lowered text.
+fn assign_char_weights_from_segment(
+    cased_segment: &str,
+    seg_tokens: &[&WeightedToken],
+    lowered_start: usize,
+    char_weights: &mut [f64],
+) {
+    let seg_lowered = lowercase(cased_segment);
+    let seg_chars: Vec<char> = seg_lowered.chars().collect();
+
+    let mut pos = 0usize;
+    for wt in seg_tokens {
+        let tok_chars: Vec<char> = wt.token.chars().collect();
+        if tok_chars.is_empty() {
+            continue;
+        }
+        if let Some(found) = find_subsequence(&seg_chars[pos..], &tok_chars) {
+            let abs_start = lowered_start + pos + found;
+            for j in 0..tok_chars.len() {
+                if abs_start + j < char_weights.len() && wt.weight > char_weights[abs_start + j] {
+                    char_weights[abs_start + j] = wt.weight;
+                }
+            }
+            let end = pos + found + tok_chars.len();
+            if end > pos && found == 0 {
+                pos = end;
+            }
+        }
+    }
+}
+
+/// Find the first occurrence of `needle` in `haystack`, returning the start
+/// index within `haystack`.
+fn find_subsequence(haystack: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    for i in 0..=(haystack.len() - needle.len()) {
+        if haystack[i..i + needle.len()] == *needle {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Like [`push_char_ngrams`] but assigns each trigram a weight derived from
+/// the per-character weights of its constituent characters:
+/// `TRIGRAM_FACTOR × max(char_weights in window)`. Trigrams whose entire
+/// window covers only stopwords/whitespace (max weight = 0.0) get weight 0.0.
+fn push_char_ngrams_weighted(normalized: &str, char_weights: &[f64], out: &mut Vec<WeightedToken>) {
+    let mut squashed_chars = Vec::with_capacity(normalized.len());
+    let mut squashed_weights = Vec::with_capacity(normalized.len());
+    let mut prev_space = false;
+    for (i, c) in normalized.chars().enumerate() {
+        if c.is_whitespace() {
+            if !prev_space {
+                squashed_chars.push(' ');
+                squashed_weights.push(0.0f64);
+                prev_space = true;
+            }
+            continue;
+        }
+        squashed_chars.push(c);
+        squashed_weights.push(if i < char_weights.len() {
+            char_weights[i]
+        } else {
+            0.0
+        });
+        prev_space = false;
+    }
+    // Trim leading/trailing spaces via index range (O(1), no shifting).
+    let start = squashed_chars
+        .iter()
+        .position(|c| *c != ' ')
+        .unwrap_or(squashed_chars.len());
+    let end = squashed_chars
+        .iter()
+        .rposition(|c| *c != ' ')
+        .map(|p| p + 1)
+        .unwrap_or(start);
+    let squashed_chars = &squashed_chars[start..end];
+    let squashed_weights = &squashed_weights[start..end];
+
+    if squashed_chars.len() < CL_NGRAM {
+        return;
+    }
+    for i in 0..=(squashed_chars.len() - CL_NGRAM) {
+        let window = &squashed_chars[i..i + CL_NGRAM];
+        if window.iter().all(|c| *c == ' ') {
+            continue;
+        }
+        let max_w = squashed_weights[i..i + CL_NGRAM]
+            .iter()
+            .fold(0.0f64, |a, &b| a.max(b));
+        let weight = if max_w > 0.0 {
+            TRIGRAM_FACTOR * max_w
+        } else {
+            0.0
+        };
+        let mut gram = String::with_capacity(CL_NGRAM + 1);
+        gram.push(NGRAM_PREFIX);
+        gram.extend(window.iter());
+        out.push(WeightedToken {
+            token: gram,
+            weight,
+        });
+    }
 }
 
 /// Cross-language character 3-grams over the whole normalized text. Whitespace
@@ -669,15 +837,42 @@ mod tests {
     }
 
     #[test]
-    fn weighted_cl_ngrams_are_zero() {
+    fn weighted_cl_ngrams_content_derived_have_trigram_factor() {
         let weighted = tokenize_weighted("hello メモリ");
         let ngrams: Vec<_> = weighted
             .iter()
             .filter(|wt| is_cl_ngram(&wt.token))
             .collect();
         assert!(!ngrams.is_empty(), "CL-CnG trigrams must still be emitted");
+        // Content-word-derived trigrams get TRIGRAM_FACTOR × 1.0 = 0.25.
+        let content_ngrams: Vec<_> = ngrams.iter().filter(|wt| wt.weight > 0.0).collect();
+        assert!(
+            !content_ngrams.is_empty(),
+            "content-word-derived trigrams must have weight > 0"
+        );
+        for wt in &content_ngrams {
+            assert_eq!(
+                wt.weight, TRIGRAM_FACTOR,
+                "content-derived CL-CnG {:?} must be TRIGRAM_FACTOR",
+                wt.token
+            );
+        }
+    }
+
+    #[test]
+    fn weighted_cl_ngrams_stopword_only_are_zero() {
+        // A pure-stopword query: all trigrams should stay at 0.0.
+        let weighted = tokenize_weighted("これは");
+        let ngrams: Vec<_> = weighted
+            .iter()
+            .filter(|wt| is_cl_ngram(&wt.token))
+            .collect();
         for wt in ngrams {
-            assert_eq!(wt.weight, 0.0, "CL-CnG {:?} must be 0.0", wt.token);
+            assert_eq!(
+                wt.weight, 0.0,
+                "stopword-only CL-CnG {:?} must be 0.0",
+                wt.token
+            );
         }
     }
 
@@ -740,5 +935,18 @@ mod tests {
     fn weighted_empty_input() {
         assert!(tokenize_weighted("").is_empty());
         assert!(tokenize_weighted("   ").is_empty());
+    }
+
+    #[test]
+    fn weighted_turkish_i_does_not_panic() {
+        // Turkish İ (U+0130) lowercases to 2 chars (i + U+0307). The
+        // char_weights array must handle the length difference gracefully.
+        let result = tokenize_weighted("İstanbul");
+        assert!(!result.is_empty());
+        let mut plain = tokenize("İstanbul");
+        let mut weighted: Vec<String> = result.into_iter().map(|wt| wt.token).collect();
+        plain.sort();
+        weighted.sort();
+        assert_eq!(plain, weighted, "multiset must match for Turkish İ");
     }
 }

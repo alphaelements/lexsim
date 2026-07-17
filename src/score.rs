@@ -57,8 +57,10 @@ pub fn token_set(text: &str) -> HashSet<String> {
 /// for the handoff use case (tens to low hundreds of memories) this is
 /// sub-millisecond and avoids any persistent-index staleness.
 pub struct Corpus {
-    /// Per-document term-frequency maps.
-    doc_tf: Vec<HashMap<String, u32>>,
+    /// Per-document term-frequency maps. Values are `f64` to support
+    /// weighted document tokens ([`build_weighted_tokens`](Corpus::build_weighted_tokens))
+    /// where a term's effective TF is the sum of its per-occurrence weights.
+    doc_tf: Vec<HashMap<String, f64>>,
     /// Per-document length (total token count).
     doc_len: Vec<f64>,
     /// Per-document ordered token stream (including CL-CnG). Needed for
@@ -80,22 +82,85 @@ impl Corpus {
         Self::build_filtered(docs, false)
     }
 
-    /// Build a corpus with stopwords and CL-CnG trigrams excluded from the
-    /// term statistics (TF, DF, document length). This is the counterpart of
-    /// [`bm25_scores_weighted`](Corpus::bm25_scores_weighted): particles and
-    /// character-trigram noise stop accumulating score across unrelated
-    /// documents, and document length reflects content words only.
+    /// Build a corpus with stopwords and stopword-only CL-CnG trigrams
+    /// excluded from the term statistics (TF, DF, document length).
+    /// Content-word-derived trigrams (those whose character window overlaps
+    /// at least one content word) are **retained** so that fuzzy
+    /// substring matching still works for paraphrase pairs that share no
+    /// exact word tokens.
     ///
-    /// The stored token *stream* is filtered too, which changes
-    /// [`cooccurrence_keywords`](Corpus::cooccurrence_keywords) window
-    /// semantics on a weighted corpus: with stopwords removed, content words
-    /// that were separated by particles become window-adjacent, so windows
-    /// reach further in text terms than on a [`build`](Corpus::build) corpus.
+    /// This is the counterpart of
+    /// [`bm25_scores_weighted`](Corpus::bm25_scores_weighted): particles
+    /// and pure-stopword character-trigram noise stop accumulating score
+    /// across unrelated documents, while content-derived trigrams keep the
+    /// fuzzy-match recall that plain BM25 had.
     ///
     /// [`build`](Corpus::build) is unchanged and keeps the raw token stream
     /// (the tokenizer's BM25 term-frequency contract).
     pub fn build_weighted(docs: &[String]) -> Self {
-        Self::build_filtered(docs, true)
+        let weighted_docs: Vec<Vec<WeightedToken>> =
+            docs.iter().map(|d| tokenize_weighted(d)).collect();
+        Self::build_weighted_tokens(&weighted_docs)
+    }
+
+    /// Build a corpus from pre-weighted document tokens. Each document is a
+    /// `Vec<WeightedToken>` — tokens with `weight <= 0.0` are excluded from
+    /// the corpus statistics, and each term's effective TF is the sum of its
+    /// per-occurrence weights (so a keyword that appears once with `weight =
+    /// 2.0` counts as if it appeared twice).
+    ///
+    /// This lets callers boost document-side terms explicitly — for example,
+    /// boosting topic keywords extracted from metadata — instead of resorting
+    /// to TF hacks (repeating keywords N times to inflate their count).
+    ///
+    /// ```
+    /// use lexsim::{Corpus, WeightedToken};
+    ///
+    /// let doc_tokens = vec![vec![
+    ///     WeightedToken { token: "memory".to_string(), weight: 2.0 },
+    ///     WeightedToken { token: "function".to_string(), weight: 1.0 },
+    /// ]];
+    /// let corpus = Corpus::build_weighted_tokens(&doc_tokens);
+    /// let scores = corpus.bm25_scores("memory");
+    /// assert!(scores[0] > 0.0);
+    /// ```
+    pub fn build_weighted_tokens(docs: &[Vec<WeightedToken>]) -> Self {
+        let mut doc_tf = Vec::with_capacity(docs.len());
+        let mut doc_len = Vec::with_capacity(docs.len());
+        let mut doc_tokens = Vec::with_capacity(docs.len());
+        let mut df: HashMap<String, u32> = HashMap::new();
+        let mut total_len = 0.0;
+
+        for doc in docs {
+            let mut tf: HashMap<String, f64> = HashMap::new();
+            let mut toks = Vec::new();
+            for wt in doc {
+                if !wt.weight.is_finite() || wt.weight <= 0.0 {
+                    continue;
+                }
+                *tf.entry(wt.token.clone()).or_insert(0.0) += wt.weight;
+                toks.push(wt.token.clone());
+            }
+            for term in tf.keys() {
+                *df.entry(term.clone()).or_insert(0) += 1;
+            }
+            doc_len.push(toks.len() as f64);
+            total_len += toks.len() as f64;
+            doc_tf.push(tf);
+            doc_tokens.push(toks);
+        }
+
+        let n = docs.len();
+        let avgdl = if n > 0 { total_len / n as f64 } else { 0.0 };
+
+        Corpus {
+            doc_tf,
+            doc_len,
+            doc_tokens,
+            df,
+            avgdl,
+            n,
+        }
     }
 
     fn build_filtered(docs: &[String], exclude_noise: bool) -> Self {
@@ -110,9 +175,9 @@ impl Corpus {
             if exclude_noise {
                 toks.retain(|t| !is_cl_ngram(t) && !is_stopword(t));
             }
-            let mut tf: HashMap<String, u32> = HashMap::new();
+            let mut tf: HashMap<String, f64> = HashMap::new();
             for t in &toks {
-                *tf.entry(t.clone()).or_insert(0) += 1;
+                *tf.entry(t.clone()).or_insert(0.0) += 1.0;
             }
             for term in tf.keys() {
                 *df.entry(term.clone()).or_insert(0) += 1;
@@ -164,16 +229,16 @@ impl Corpus {
             return Vec::new();
         }
 
-        let mut global_tf: HashMap<&str, u32> = HashMap::new();
+        let mut global_tf: HashMap<&str, f64> = HashMap::new();
         for tf_map in &self.doc_tf {
             for (term, &count) in tf_map {
                 if !is_cl_ngram(term) && !is_stopword(term) {
-                    *global_tf.entry(term.as_str()).or_insert(0) += count;
+                    *global_tf.entry(term.as_str()).or_insert(0.0) += count;
                 }
             }
         }
 
-        let total_tokens: f64 = global_tf.values().map(|&c| c as f64).sum();
+        let total_tokens: f64 = global_tf.values().sum();
         if total_tokens == 0.0 {
             return Vec::new();
         }
@@ -182,7 +247,7 @@ impl Corpus {
             .iter()
             .filter_map(|(&term, &count)| {
                 let df = *self.df.get(term)? as f64;
-                let tf = count as f64 / total_tokens;
+                let tf = count / total_tokens;
                 let idf = ((self.n as f64 + 1.0) / df).ln();
                 let score = tf * idf;
                 if score <= 0.0 {
@@ -191,7 +256,7 @@ impl Corpus {
                 Some(KeywordEntry {
                     keyword: term.to_string(),
                     score,
-                    count,
+                    count: count.round() as u32,
                 })
             })
             .collect();
@@ -344,7 +409,7 @@ impl Corpus {
 
             for (i, tf_map) in self.doc_tf.iter().enumerate() {
                 let tf = match tf_map.get(term) {
-                    Some(&tf) => tf as f64,
+                    Some(&tf) => tf,
                     None => continue,
                 };
                 let dl = self.doc_len[i];
@@ -377,7 +442,7 @@ impl Corpus {
 
             for (i, tf_map) in self.doc_tf.iter().enumerate() {
                 let tf = match tf_map.get(term) {
-                    Some(&tf) => tf as f64,
+                    Some(&tf) => tf,
                     None => continue,
                 };
                 let dl = self.doc_len[i];
@@ -981,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn weighted_corpus_excludes_stopwords_and_ngrams() {
+    fn weighted_corpus_excludes_stopwords_and_stopword_only_ngrams() {
         let docs = vec!["この機能は便利です".to_string()];
         let plain = Corpus::build(&docs);
         let weighted = Corpus::build_weighted(&docs);
@@ -991,10 +1056,19 @@ mod tests {
         assert_eq!(weighted.bm25_scores_tokens(&["は".to_string()])[0], 0.0);
         // Content words still score.
         assert!(weighted.bm25_scores_tokens(&["機能".to_string()])[0] > 0.0);
-        // CL-CnG trigrams are gone too.
-        assert_eq!(
-            weighted.bm25_scores_tokens(&["\u{1}この機".to_string()])[0],
-            0.0
+    }
+
+    #[test]
+    fn weighted_corpus_retains_content_derived_ngrams() {
+        // Content-word-derived trigrams must be present in the weighted
+        // corpus so fuzzy substring matching still works.
+        let docs = vec!["メモリ機能".to_string()];
+        let weighted = Corpus::build_weighted(&docs);
+        // A trigram covering content characters (e.g. "メモリ") must score.
+        let trigram = format!("\u{1}メモリ");
+        assert!(
+            weighted.bm25_scores_tokens(&[trigram.clone()])[0] > 0.0,
+            "content-derived trigram {trigram:?} must be in the weighted corpus"
         );
     }
 
@@ -1093,5 +1167,72 @@ mod tests {
         // panic and should still surface the lone term.
         let kw = textrank_keywords("機能", 4, 10);
         assert!(kw.iter().any(|k| k.keyword == "機能") || kw.is_empty());
+    }
+
+    #[test]
+    fn build_weighted_tokens_boosts_doc_side_tf() {
+        // A keyword with weight 2.0 should have higher effective TF than
+        // the same keyword with weight 1.0 in another doc.
+        let doc_a = vec![WeightedToken {
+            token: "memory".to_string(),
+            weight: 2.0,
+        }];
+        let doc_b = vec![WeightedToken {
+            token: "memory".to_string(),
+            weight: 1.0,
+        }];
+        let corpus = Corpus::build_weighted_tokens(&[doc_a, doc_b]);
+        let scores = corpus.bm25_scores("memory");
+        assert!(
+            scores[0] > scores[1],
+            "boosted doc must outscore unboosted: {scores:?}"
+        );
+    }
+
+    #[test]
+    fn build_weighted_tokens_excludes_zero_weight() {
+        let doc = vec![
+            WeightedToken {
+                token: "content".to_string(),
+                weight: 1.0,
+            },
+            WeightedToken {
+                token: "noise".to_string(),
+                weight: 0.0,
+            },
+        ];
+        let corpus = Corpus::build_weighted_tokens(&[doc]);
+        assert!(corpus.bm25_scores("content")[0] > 0.0);
+        assert_eq!(corpus.bm25_scores("noise")[0], 0.0);
+    }
+
+    #[test]
+    fn build_weighted_tokens_empty_docs() {
+        let corpus = Corpus::build_weighted_tokens(&[]);
+        assert!(corpus.is_empty());
+    }
+
+    #[test]
+    fn build_weighted_tokens_matches_build_weighted_for_plain_text() {
+        // build_weighted(docs) is now implemented as
+        // build_weighted_tokens(tokenize_weighted(doc) for each doc).
+        // The scores must agree.
+        let docs = vec![
+            "atomic_write を必ず使う".to_string(),
+            "ガントチャートの表示設定".to_string(),
+        ];
+        let from_text = Corpus::build_weighted(&docs);
+        let from_tokens = Corpus::build_weighted_tokens(
+            &docs
+                .iter()
+                .map(|d| tokenize_weighted(d))
+                .collect::<Vec<_>>(),
+        );
+        let q = "atomic_write";
+        let s1 = from_text.bm25_scores(q);
+        let s2 = from_tokens.bm25_scores(q);
+        for (a, b) in s1.iter().zip(s2.iter()) {
+            assert!((a - b).abs() < 1e-9, "scores must match: {s1:?} vs {s2:?}");
+        }
     }
 }

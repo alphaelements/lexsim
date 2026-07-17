@@ -103,7 +103,7 @@ pub use sentiment::{analyze_sentiment, Polarity, SentimentResult};
 pub use stopwords::is_stopword;
 pub use tokenize::{
     is_cl_ngram, normalize, tokenize, tokenize_ngrams, tokenize_weighted, WeightedToken,
-    CASE_BOOST, OBJECT_BOOST, TOPIC_BOOST,
+    CASE_BOOST, OBJECT_BOOST, TOPIC_BOOST, TRIGRAM_FACTOR,
 };
 pub use tokens::estimate_tokens;
 
