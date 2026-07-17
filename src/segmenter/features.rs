@@ -153,7 +153,7 @@ impl PriorDecision {
 /// `prior` gives the last up-to-3 boundary decisions for candidates before
 /// this one (nearest first, i.e. `prior[0]` is the decision immediately to the
 /// left of this candidate). Missing entries (near the start of the run) are
-/// treated as `O` via [`PAD_CLASS`]-equivalent padding, matching litsea's
+/// treated as `O` via `PAD_CLASS`-equivalent padding, matching litsea's
 /// begin-of-run convention.
 pub fn extract_features(chars: &[char], i: usize, prior: &[PriorDecision]) -> Vec<String> {
     debug_assert!(

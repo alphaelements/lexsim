@@ -128,6 +128,11 @@ const JA_STOPWORDS: &[&str] = &[
     // キーワード出力に漏出）。`だろ` と一致する内容語は存在しない。
     "だろ",
     "でしょう",
+    // 口語の文末 `でし`（`でした` の縮約）。記号・ASCII・絵文字・文末でランが
+    // 途切れると `そうでし！` => [そう, でし], `やったでし♪` => [やった, でし]
+    // のように独立トークンで現れる。巻き添え: ひらがな「弟子」(でし) は極めて
+    // 稀（漢字表記が標準）で、実コーパス上の衝突例は確認されていない。
+    "でし",
     // Single-character auxiliary the segmenter emits when it mis-splits `です`
     // into `で` + `す` (see x-metrics referral ref-20260710-060424-851178046).
     // `JA_SINGLE_CHAR_FUNCTION_CHARS` is a two-character-token heuristic and
@@ -215,13 +220,13 @@ const JA_SINGLE_CHAR_FUNCTION_CHARS: &[char] = &[
 /// (`tfidf_keywords`, `corpus_diff`), not inside the tokenizer itself.
 ///
 /// Two checks are combined:
-/// 1. Exact match against [`JA_STOPWORDS`] (catches lone trailing particles
+/// 1. Exact match against `JA_STOPWORDS` (catches lone trailing particles
 ///    and multi-character auxiliaries that exactly fill a token).
 /// 2. For a two-character token that is *not* entirely Japanese-script
 ///    (hiragana/katakana/kanji, per
-///    [`crate::segmenter::inference::is_japanese_run_char`]), either
+///    `crate::segmenter::inference::is_japanese_run_char`), either
 ///    character being a single-character particle or auxiliary fragment
-///    (see [`JA_SINGLE_CHAR_FUNCTION_CHARS`]) — catches the CJK bigram
+///    (see `JA_SINGLE_CHAR_FUNCTION_CHARS`) — catches the CJK bigram
 ///    fallback path gluing a particle/auxiliary fragment to a
 ///    non-Japanese-script character (Hangul, Latin, digits, punctuation,
 ///    ...). A bigram of two Japanese-script characters is always produced by
@@ -422,26 +427,35 @@ mod tests {
     }
 
     #[test]
+    fn deshi_is_a_stopword() {
+        // Colloquial sentence-final `でし` (`でした` truncated at a run
+        // boundary): `そうでし！` => [そう, でし], `やったでし♪` =>
+        // [やった, でし]. The hiragana spelling of 弟子 is extremely rare
+        // (kanji is standard); no real-corpus collision observed.
+        assert!(is_stopword("でし"));
+        assert!(is_stopword("でした"));
+    }
+
+    #[test]
+    fn deshi_as_a_stopword_does_not_swallow_content_words() {
+        // Two-character all-Japanese-script content words starting with で
+        // must not be affected — the exact-match lookup is whole-token and
+        // the bigram heuristic never fires on all-Japanese-script bigrams.
+        assert!(!is_stopword("でこ")); // 凸 (bump/forehead)
+        assert!(!is_stopword("でむ")); // two-char Japanese-script token starting with で
+    }
+
+    #[test]
     fn merged_conjugations_are_not_expected_as_standalone_tokens() {
-        // x-metrics' referral also asked for `でし` / `なっ` / `たい` / `んだ`.
-        // Mid-prose the segmenter merges those into `でした` (or splits them
-        // as `で` + `した`), `なった`, `試したい`, `読んだ`, so they are
-        // deliberately *not* added to `JA_STOPWORDS` (yet). This test
-        // documents that decision.
-        //
-        // (`なく` was in this list until 0.5.1; it *does* appear standalone —
-        // see `naku_as_a_stopword_does_not_swallow_content_words`.)
-        for w in ["でし", "なっ", "たい", "んだ"] {
+        // `なっ` / `たい` / `んだ` are still deliberately *not* added.
+        // `でし` was promoted (see `deshi_is_a_stopword`); `なく` was
+        // promoted in 0.5.1; `だろ` was promoted in 0.6.0.
+        for w in ["なっ", "たい", "んだ"] {
             assert!(!is_stopword(w), "{w} should not be a stopword");
         }
-        // NOTE: this "never emitted standalone" assumption is *per word*, not
-        // a general rule — `なく` (0.5.1) and `だろ` (see `daro_is_a_stopword`)
-        // both turned out to be emitted standalone at run boundaries
-        // (punctuation/ASCII/emoji/end-of-text) and were promoted to
-        // `JA_STOPWORDS`. `でし` and `なっ` also appear standalone at run
-        // boundaries in colloquial text (`そうでし！`, `なっ、そうか`) but are
-        // deliberately deferred pending frequency evidence; `たい` collides
-        // with hiragana 鯛 (`たいが釣れた` => [たい, が, 釣れた]) and stays out.
+        // `たい` collides with hiragana 鯛 (`たいが釣れた` => [たい, が, 釣れた]).
+        // `なっ` appears at run boundaries (`なっ、そうか`) but is low-frequency.
+        // `んだ` is mostly covered by the existing `だ` entry.
         assert!(is_stopword("だろう"));
     }
 

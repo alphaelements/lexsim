@@ -43,7 +43,7 @@ pub use inference::push_segmented_ja;
 /// the training command). Parsing happens once, lazily, on first access.
 static MODEL_BYTES: &[u8] = include_bytes!("../model_data/ja_segmenter.bin");
 
-/// Lazily-parsed zero-copy view over [`MODEL_BYTES`].
+/// Lazily-parsed zero-copy view over `MODEL_BYTES`.
 pub static MODEL: std::sync::LazyLock<binary::ModelView<'static>> =
     std::sync::LazyLock::new(|| {
         binary::ModelView::from_bytes(MODEL_BYTES).expect("embedded model is valid")
