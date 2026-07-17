@@ -50,7 +50,7 @@ documents). Its only runtime dependencies are `unicode-segmentation` and
 
 ```toml
 [dependencies]
-lexsim = "0.4"
+lexsim = "0.6"
 ```
 
 ## Usage
@@ -178,6 +178,7 @@ echo '{"texts": ["This is great!", "Terrible bug"]}' | lexsim sentiment
 | `corpus_diff` | compare two corpora for distinctive keywords |
 | `analyze_sentiment` | dictionary-based sentiment polarity classification (ja/en) |
 | `content_hash` / `fnv1a_hex` | stable content hashing for change detection |
+| `estimate_tokens` | cheap heuristic estimate of model-token count, for token-budget keeping |
 | `is_stopword` | Japanese stopword filter (particles, auxiliaries, demonstratives) |
 | `segmenter` | AdaBoost-based Japanese word segmenter (public module for advanced use) |
 | `Scorer` / `LexicalScorer` | trait + lexical impl; lets an embedding-based scorer slot in later behind one call site |

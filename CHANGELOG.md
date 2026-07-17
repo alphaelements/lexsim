@@ -2,6 +2,17 @@
 
 ## 0.6.0
 
+### ⚠ Breaking
+
+- **`content_hash` values change.** The boundary segmenter was retrained for
+  the `々` fix (see *Fixed* below), and the retrain shifts word boundaries
+  well beyond texts containing `々`: roughly 10% of the Japanese sentences in
+  the training corpus tokenize differently (measured: 129 of 1344 `々`-free
+  sentences), so every `content_hash` derived from an affected text changes.
+  Downstream deduplication caches keyed on `content_hash` are invalidated and
+  will re-hash on first use. ASCII-only text is unaffected. No API signature
+  changed.
+
 ### Added
 
 - **Particle-context weighted BM25** — uses Japanese case particles as a
@@ -50,11 +61,12 @@
 
   Known limitation: a kanji word directly following a 々 word can merge with
   it (時々雨 → one token). 々|漢字 boundaries are too rare in the corpus to
-  learn; unlike the old behaviour, no bare `々` token leaks out. Pinned in
-  `tests/segmenter_quality.rs`.
+  learn; unlike the old behaviour, `々` no longer splits off a kanji stem
+  (degenerate inputs like a standalone `々` or `A々B` still emit a bare `々`
+  token, as before). Pinned in `tests/segmenter_quality.rs`.
 
-  `content_hash` values change for texts containing `々` (token stream
-  differs), and `ja_segmenter.bin` was retrained.
+  The retrained `ja_segmenter.bin` also shifts boundaries on unrelated
+  Japanese text — see *⚠ Breaking* above for the `content_hash` impact.
 
 - **`だろ` is now a stopword.** The colloquial sentence-final `だろ` (truncated
   `だろう`) is emitted as a standalone token whenever a Japanese run ends at
@@ -65,7 +77,8 @@
   the full form `だろう` (already a stopword) is unaffected.
 
   This fix by itself leaves `content_hash` unchanged — stopwords only apply
-  at the extraction stage (but see the `々` fix above, which does change it).
+  at the extraction stage (but see *⚠ Breaking* above: the segmenter retrain
+  in this release does change hashes).
 
 ## 0.5.1
 
