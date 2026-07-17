@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **The iteration mark `々` (U+3005) no longer splits off its stem.**
+  `tokenize("人々")` returned `["人", "々"]` and `tokenize("佐々木")` returned
+  `["佐", "々", "木"]`. The root cause was not the boundary model: `々` was
+  missing from both `is_non_spacing_script` (tokenize.rs) and the segmenter's
+  kanji class (features.rs), so 人々 fractured at the script-segmentation
+  stage before the AdaBoost model ever saw the junction. `々` is now classed
+  as kanji in both places and the model was retrained (same corpora, same
+  1000 iterations), which makes the 漢字|々 junctions in the existing corpus
+  trainable at all — the 9 seed sentences suffice, and the model generalizes
+  to 々 words absent from the corpus (木々, 山々, 隅々, 佐々木, 代々木).
+  Supplement sentences were tried and rejected: every variant regressed
+  precision or word F1 (see the note in `training/context_supplement.txt`).
+  Corpus metrics improved: boundary F1 0.9041 → 0.9045, boundary precision
+  0.8875 → 0.8914, word F1 0.8065 → 0.8069.
+
+  Known limitation: a kanji word directly following a 々 word can merge with
+  it (時々雨 → one token). 々|漢字 boundaries are too rare in the corpus to
+  learn; unlike the old behaviour, no bare `々` token leaks out. Pinned in
+  `tests/segmenter_quality.rs`.
+
+  `content_hash` values change for texts containing `々` (token stream
+  differs), and `ja_segmenter.bin` was retrained.
+
 ## 0.6.0
 
 ### Added

@@ -27,20 +27,23 @@
 
 use lexsim::segmenter::eval::evaluate_corpus;
 
-/// Measured on 2026-07-10 against the model trained on
+/// Measured on 2026-07-17 against the model trained on
 /// `seed_corpus.txt` + `context_supplement.txt`, scored over **both**:
 ///
 /// ```text
-/// runs=3285 exact=1778 (54.1%)
-/// boundary P=0.8875 R=0.9213 F1=0.9041
-/// word     P=0.7946 R=0.8188 F1=0.8065
+/// runs=3280 exact=1779 (54.2%)
+/// boundary P=0.8914 R=0.9179 F1=0.9045
+/// word     P=0.7974 R=0.8165 F1=0.8069
 /// ```
 ///
-/// Adding the supplement fixed the high-frequency `漢字 + です` and
+/// The 2026-07-10 supplement fixed the high-frequency `漢字 + です` and
 /// `漢字 + たち` mis-splits that motivated it (x-metrics referral
-/// ref-20260710-060424-851178046) while leaving overall accuracy flat:
-/// boundary F1 0.9037 → 0.9041 across the full training set, and 0.9037 →
-/// 0.9034 when scored over `seed_corpus.txt` alone.
+/// ref-20260710-060424-851178046) while leaving overall accuracy flat
+/// (boundary F1 0.9037 → 0.9041). The 2026-07-17 iteration-mark fix
+/// (々 U+3005 classed as kanji, model retrained so 漢字|々 junctions are
+/// trainable at all) nudged everything up: boundary F1 0.9041 → 0.9045,
+/// word F1 0.8065 → 0.8069. Run count changed (3285 → 3280) because words
+/// containing 々 now merge into their surrounding Japanese runs.
 ///
 /// The floors sit ~0.4–1.1pt below the measured values. That margin absorbs
 /// float noise, not regressions — training is deterministic (a retrain
@@ -149,6 +152,76 @@ fn kanji_followed_by_tachi_is_one_token() {
     for text in ["子供たち", "学生たち", "私たち"] {
         let got = words(text);
         assert_eq!(got, vec![text.to_string()], "{text} should be one token");
+    }
+}
+
+#[test]
+fn iteration_mark_words_are_not_split() {
+    // 々 (U+3005, ideographic iteration mark) repeats the preceding kanji and
+    // never starts a word. It used to be excluded from both the tokenizer's
+    // non-spacing script ranges and the segmenter's kanji class, so 人々
+    // fractured into ["人", "々"] at the script-segmentation stage — before
+    // the boundary model even ran.
+    for text in ["人々", "島々", "日々", "時々", "我々", "佐々木"] {
+        let got = words(text);
+        assert_eq!(
+            got,
+            vec![text.to_string()],
+            "{text} should be one token, got {got:?}"
+        );
+    }
+}
+
+#[test]
+fn iteration_mark_words_survive_sentence_context() {
+    // The same words must stay whole mid-sentence, next to particles — not
+    // only in isolation. 山々/木々/隅々 do not appear in either training
+    // corpus, so they also pin generalization to unseen 々 words.
+    for (text, word) in [
+        ("街の人々が集まった", "人々"),
+        ("島々を巡る旅", "島々"),
+        ("佐々木さんに会った", "佐々木"),
+        ("我々の日々の記録", "我々"),
+        ("我々の日々の記録", "日々"),
+        ("山々が連なる", "山々"),
+        ("木々の間から光が差す", "木々"),
+        ("隅々まで掃除した", "隅々"),
+    ] {
+        let got = words(text);
+        assert!(
+            got.contains(&word.to_string()),
+            "{text} should keep {word} whole, got {got:?}"
+        );
+        assert!(
+            !got.contains(&"々".to_string()),
+            "{text} must not emit a bare 々, got {got:?}"
+        );
+    }
+}
+
+#[test]
+fn iteration_mark_stays_glued_even_when_kanji_compounds_merge() {
+    // Known limitation: a kanji word directly after a 々 word can merge with
+    // it (時々雨 → one token) — 々|漢字 boundaries are too rare in the corpus
+    // for the learner to pick their features, and supplement sentences did
+    // not fix it (6 targeted lines left 時々雨 merged and cost 0.9pt of
+    // boundary F1; see training/context_supplement.txt). The contract pinned
+    // here is what the fix guarantees: 々 never splits off its stem, in
+    // either direction.
+    for (text, stem) in [
+        ("時々雨が降る", "時々"),
+        ("年々増加している", "年々"),
+        ("日々努力を続ける", "日々"),
+    ] {
+        let got = words(text);
+        assert!(
+            got.iter().any(|w| w.starts_with(stem)),
+            "{text}: some token should start with {stem}, got {got:?}"
+        );
+        assert!(
+            got.iter().all(|w| w != "々" && !w.starts_with('々')),
+            "{text}: 々 must never be split off its stem, got {got:?}"
+        );
     }
 }
 
