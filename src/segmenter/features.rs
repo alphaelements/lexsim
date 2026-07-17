@@ -13,7 +13,8 @@
 pub enum CharClass {
     /// Kanji numerals (一二三...十百千万億兆).
     KanjiNumeral,
-    /// Han ideographs (CJK Unified Ideographs block), excluding kanji numerals.
+    /// Han ideographs (CJK Unified Ideographs block) plus the iteration mark
+    /// 々, excluding kanji numerals.
     Kanji,
     /// Hiragana (U+3040-309F).
     Hiragana,
@@ -109,7 +110,14 @@ fn is_katakana(c: char) -> bool {
 }
 
 fn is_kanji(c: char) -> bool {
-    matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
+    // 0x3005 is 々, the ideographic iteration mark. It repeats the preceding
+    // kanji (人々, 佐々木) and never starts a word, so it behaves as kanji for
+    // boundary purposes. Excluding it would fracture 人々 into two script
+    // runs before the boundary model ever saw the junction.
+    matches!(
+        c as u32,
+        0x3005 | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
+    )
 }
 
 /// Placeholder character used to pad the context window past the start/end

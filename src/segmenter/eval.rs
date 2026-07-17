@@ -26,10 +26,11 @@
 //!
 //! The approximation is not byte-exact: `tokenize()` NFKC-normalizes first,
 //! and its `ScriptClass::NonSpacing` is not quite
-//! [`is_japanese_run_char`] (`々` U+3005 and CJK Extension B are classed
-//! differently). The gold corpora contain no such characters, so the two agree
-//! on everything this module scores; a corpus that introduced them would need
-//! this run extraction reconciled with `tokenize.rs`'s `classify`.
+//! [`is_japanese_run_char`] (CJK Extension B is classed differently; `々`
+//! U+3005 is kanji in both since the iteration-mark fix). The gold corpora
+//! contain no Extension B characters, so the two agree on everything this
+//! module scores; a corpus that introduced them would need this run
+//! extraction reconciled with `tokenize.rs`'s `classify`.
 
 use super::inference::is_japanese_run_char;
 use super::push_segmented_ja;

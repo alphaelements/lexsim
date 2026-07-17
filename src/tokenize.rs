@@ -147,7 +147,8 @@ fn classify(c: char) -> ScriptClass {
 /// recall is best served by character n-grams. Ranges per the Unicode blocks.
 pub(crate) fn is_non_spacing_script(c: char) -> bool {
     matches!(c as u32,
-        0x3040..=0x309F   // Hiragana
+        0x3005            // 々 ideographic iteration mark (repeats the preceding kanji)
+        | 0x3040..=0x309F // Hiragana
         | 0x30A0..=0x30FF // Katakana
         | 0x31F0..=0x31FF // Katakana Phonetic Extensions
         | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
